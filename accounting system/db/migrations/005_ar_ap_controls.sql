@@ -1,0 +1,2 @@
+ALTER TABLE contacts
+  ADD COLUMN IF NOT EXISTS credit_limit NUMERIC(14, 2);
