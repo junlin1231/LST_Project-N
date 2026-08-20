@@ -5,7 +5,7 @@ import { AppShell } from "@/components/app-shell"
 import "./globals.css"
 
 export const metadata: Metadata = {
-  title: "Ledger - Double-entry accounting",
+  title: "Accounting System",
   description:
     "A double-entry accounting system for small businesses: general ledger, journal entries, Accounts Receivable, Accounts Payable parties, and financial statements.",
   generator: "v0.app",

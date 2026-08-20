@@ -57,17 +57,16 @@
 - [x] Create accounting rule module/service.
 - [x] Define rule input and output types.
 - [x] Add rule execution log table.
-- [x] Implement invoice posting rule.
-- [x] Implement payment receipt posting rule.
-- [x] Implement expense document posting rule.
-- [x] Implement tax posting rule placeholder.
+- [ ] Implement invoice posting rule.
+- [ ] Implement payment receipt posting rule.
+- [ ] Implement expense document posting rule.
+- [ ] Implement tax posting rule placeholder.
 - [x] Add configurable account mappings.
-- [x] Add rule versioning.
-- [x] Add manual override path.
-- [x] Expose accounting rule posting actions through the accounting API.
-- [x] Add tests for debit/credit output of each rule.
-- [x] Add rounding tests.
-- [x] Add tax calculation tests.
+- [ ] Add rule versioning.
+- [ ] Add manual override path.
+- [ ] Add tests for debit/credit output of each rule.
+- [ ] Add rounding tests.
+- [ ] Add tax calculation tests.
 
 ## Phase 3: OCR Document Intake
 

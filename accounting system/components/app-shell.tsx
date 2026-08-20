@@ -59,11 +59,11 @@ function Brand() {
   return (
     <div className="flex items-center gap-2.5 px-2">
       <div className="flex size-8 items-center justify-center rounded-md bg-sidebar-primary text-sidebar-primary-foreground font-mono text-sm font-bold">
-        L
+        A
       </div>
       <div className="leading-tight">
-        <p className="text-sm font-semibold text-sidebar-foreground">Ledger</p>
-        <p className="text-[11px] text-sidebar-foreground/60">Double-entry accounting</p>
+        <p className="text-sm font-semibold text-sidebar-foreground">Accounting System</p>
+        <p className="text-[11px] text-sidebar-foreground/60">Double-entry finance</p>
       </div>
     </div>
   )
@@ -105,9 +105,9 @@ export function AppShell({ children }: { children: ReactNode }) {
           </Sheet>
           <div className="flex items-center gap-2">
             <div className="flex size-7 items-center justify-center rounded-md bg-sidebar text-sidebar-primary-foreground font-mono text-xs font-bold">
-              L
+              A
             </div>
-            <span className="text-sm font-semibold">Ledger</span>
+            <span className="text-sm font-semibold">Accounting System</span>
           </div>
         </header>
 

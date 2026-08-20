@@ -1,7 +1,7 @@
 "use client"
 
 import { useMemo, useState } from "react"
-import { Calculator, CalendarDays, CheckCircle2, Landmark, Plus, Save } from "lucide-react"
+import { Calculator, CalendarDays, Download, Landmark, Plus, Save } from "lucide-react"
 import { Amount } from "@/components/amount"
 import { ConfirmationDialog } from "@/components/governance/confirmation-dialog"
 import { Badge } from "@/components/ui/badge"
@@ -71,6 +71,38 @@ function emptyAsset(): Omit<FixedAsset, "id"> {
     accumulatedDepreciationAccountId: "1590",
     depreciationExpenseAccountId: "5700",
   }
+}
+
+type CsvRow = Record<string, string | number | boolean | undefined>
+
+function csvValue(value: string | number | boolean | undefined) {
+  const text = String(value ?? "")
+  return /[",\n]/.test(text) ? `"${text.replaceAll("\"", "\"\"")}"` : text
+}
+
+function downloadCsv(filename: string, rows: CsvRow[]) {
+  if (rows.length === 0) return
+  const headers = Object.keys(rows[0])
+  const csv = [
+    headers.join(","),
+    ...rows.map((row) => headers.map((header) => csvValue(row[header])).join(",")),
+  ].join("\n")
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement("a")
+  link.href = url
+  link.download = filename
+  link.click()
+  URL.revokeObjectURL(url)
+}
+
+function ExportButton({ label, onClick }: { label: string; onClick: () => void }) {
+  return (
+    <Button variant="outline" size="sm" onClick={onClick}>
+      <Download className="size-4" />
+      {label}
+    </Button>
+  )
 }
 
 export function ReportsView() {
@@ -162,6 +194,133 @@ export function ReportsView() {
     }
   }
 
+  function fileName(name: string) {
+    return `${name}-${periodStart}-to-${periodEnd}.csv`
+  }
+
+  function exportTrialBalance() {
+    downloadCsv(fileName("trial-balance"), [
+      ...trialBalance.map((row) => ({ AccountCode: row.code, AccountName: row.name, Type: row.type, Debit: row.debit, Credit: row.credit })),
+      { AccountCode: "", AccountName: "Total", Type: "", Debit: totalDebits, Credit: totalCredits },
+    ])
+  }
+
+  function exportGeneralLedger() {
+    downloadCsv(fileName("general-ledger"), generalLedger.map((line) => ({
+      Date: line.date,
+      Account: line.accountName,
+      Description: line.description,
+      Reference: line.reference,
+      Debit: line.debit,
+      Credit: line.credit,
+      RunningBalance: line.runningBalance,
+    })))
+  }
+
+  function exportProfitOrLoss() {
+    downloadCsv(fileName("profit-or-loss"), [
+      ...profit.revenue.lines.map((line) => ({ Section: "Revenue", AccountCode: line.code, AccountName: line.name, Amount: line.amount })),
+      { Section: "Revenue", AccountCode: "", AccountName: "Revenue Total", Amount: profit.revenue.total },
+      ...profit.expenses.lines.map((line) => ({ Section: "Expenses", AccountCode: line.code, AccountName: line.name, Amount: line.amount })),
+      { Section: "Expenses", AccountCode: "", AccountName: "Expense Total", Amount: profit.expenses.total },
+      { Section: "Result", AccountCode: "", AccountName: "Net Profit / Loss", Amount: profit.netProfitLoss },
+    ])
+  }
+
+  function exportFinancialPosition() {
+    downloadCsv(`financial-position-as-of-${periodEnd}.csv`, [
+      ...position.assets.lines.map((line) => ({ Section: "Assets", AccountCode: line.code, AccountName: line.name, Amount: line.amount })),
+      { Section: "Assets", AccountCode: "", AccountName: "Assets Total", Amount: position.assets.total },
+      ...position.liabilities.lines.map((line) => ({ Section: "Liabilities", AccountCode: line.code, AccountName: line.name, Amount: line.amount })),
+      { Section: "Liabilities", AccountCode: "", AccountName: "Liabilities Total", Amount: position.liabilities.total },
+      ...position.equity.lines.map((line) => ({ Section: "Equity", AccountCode: line.code, AccountName: line.name, Amount: line.amount })),
+      { Section: "Equity", AccountCode: "", AccountName: "Equity Total", Amount: position.equity.total },
+      { Section: "Check", AccountCode: "", AccountName: "Balanced", Amount: position.balanced },
+    ])
+  }
+
+  function exportCashFlow() {
+    downloadCsv(fileName("cash-flows"), [
+      ...cashFlow.operatingActivities.lines.map((line) => ({ Section: "Operating", Activity: line.name, Amount: line.amount })),
+      { Section: "Operating", Activity: "Operating Total", Amount: cashFlow.operatingActivities.total },
+      ...cashFlow.investingActivities.lines.map((line) => ({ Section: "Investing", Activity: line.name, Amount: line.amount })),
+      { Section: "Investing", Activity: "Investing Total", Amount: cashFlow.investingActivities.total },
+      ...cashFlow.financingActivities.lines.map((line) => ({ Section: "Financing", Activity: line.name, Amount: line.amount })),
+      { Section: "Financing", Activity: "Financing Total", Amount: cashFlow.financingActivities.total },
+      { Section: "Summary", Activity: "Opening Cash", Amount: cashFlow.openingCash },
+      { Section: "Summary", Activity: "Net Cash Movement", Amount: cashFlow.netCashMovement },
+      { Section: "Summary", Activity: "Closing Cash", Amount: cashFlow.closingCash },
+    ])
+  }
+
+  function exportEquity() {
+    downloadCsv(fileName("changes-in-equity"), [
+      { Line: "Opening Equity", Amount: equity.openingEquity },
+      { Line: "Capital Introduced", Amount: equity.capitalIntroduced },
+      { Line: "Withdrawals", Amount: equity.withdrawals },
+      { Line: "Net Profit / Loss", Amount: equity.netProfitLoss },
+      { Line: "Closing Equity", Amount: equity.closingEquity },
+    ])
+  }
+
+  function exportNotes() {
+    downloadCsv(fileName("financial-statement-notes"), notes.flatMap((note) => note.rows.map((row) => ({
+      Note: note.title,
+      Label: row.label,
+      Amount: row.amount,
+      Detail: row.note,
+    }))))
+  }
+
+  function exportFixedAssets() {
+    downloadCsv(fileName("fixed-assets"), [
+      ...fixedAssets.map((asset) => ({
+        AssetNumber: asset.assetNumber,
+        Name: asset.name,
+        PurchaseDate: asset.purchaseDate,
+        Cost: asset.purchasePrice,
+        UsefulLifeMonths: asset.usefulLifeMonths,
+        SalvageValue: asset.salvageValue,
+        MonthlyDepreciation: calculateMonthlyDepreciation(asset),
+        Status: asset.status,
+      })),
+      ...depreciationSchedules.map((schedule) => ({
+        AssetNumber: fixedAssets.find((asset) => asset.id === schedule.assetId)?.assetNumber ?? schedule.assetId,
+        Name: "Depreciation Schedule",
+        PurchaseDate: schedule.periodDate,
+        Cost: schedule.depreciationAmount,
+        UsefulLifeMonths: "",
+        SalvageValue: "",
+        MonthlyDepreciation: "",
+        Status: schedule.status,
+      })),
+    ])
+  }
+
+  function exportClosePreview() {
+    downloadCsv(fileName("period-close-preview"), closePreview.lines.map((line) => ({
+      Account: accountName(line.accountId),
+      Debit: line.debit,
+      Credit: line.credit,
+    })))
+  }
+
+  function exportAllReports() {
+    const rows: CsvRow[] = [
+      { Statement: "Profit or Loss", Section: "Revenue", Line: "Total Revenue", Amount: profit.revenue.total },
+      { Statement: "Profit or Loss", Section: "Expenses", Line: "Total Expenses", Amount: profit.expenses.total },
+      { Statement: "Profit or Loss", Section: "Result", Line: "Net Profit / Loss", Amount: profit.netProfitLoss },
+      { Statement: "Financial Position", Section: "Assets", Line: "Total Assets", Amount: position.assets.total },
+      { Statement: "Financial Position", Section: "Liabilities", Line: "Total Liabilities", Amount: position.liabilities.total },
+      { Statement: "Financial Position", Section: "Equity", Line: "Total Equity", Amount: position.equity.total },
+      { Statement: "Cash Flows", Section: "Summary", Line: "Opening Cash", Amount: cashFlow.openingCash },
+      { Statement: "Cash Flows", Section: "Summary", Line: "Net Cash Movement", Amount: cashFlow.netCashMovement },
+      { Statement: "Cash Flows", Section: "Summary", Line: "Closing Cash", Amount: cashFlow.closingCash },
+      { Statement: "Changes in Equity", Section: "Summary", Line: "Closing Equity", Amount: equity.closingEquity },
+    ]
+    downloadCsv(fileName("financial-statements-pack"), rows)
+  }
+
   return (
     <div className="space-y-4 p-4 md:p-6">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
@@ -169,7 +328,7 @@ export function ReportsView() {
           <h1 className="text-xl font-semibold">Reports</h1>
           <p className="mt-1 text-sm text-muted-foreground">Financial statements, depreciation, and period-end controls.</p>
         </div>
-        <div className="grid gap-2 sm:grid-cols-[10rem_10rem_auto]">
+        <div className="grid gap-2 sm:grid-cols-[10rem_10rem_auto_auto]">
           <div className="grid gap-1">
             <Label htmlFor="report-start">Start</Label>
             <Input id="report-start" type="date" value={periodStart} onChange={(event) => setPeriodStart(event.target.value)} />
@@ -182,6 +341,9 @@ export function ReportsView() {
             <Calculator className="size-4" />
             Preview Close
           </Button>
+          <div className="self-end">
+            <ExportButton label="Export All" onClick={exportAllReports} />
+          </div>
         </div>
       </div>
 
@@ -207,7 +369,8 @@ export function ReportsView() {
           </div>
         </TabsContent>
 
-        <TabsContent value="trial">
+        <TabsContent value="trial" className="space-y-3">
+          <div className="flex justify-end"><ExportButton label="Export Trial Balance" onClick={exportTrialBalance} /></div>
           <Card className="overflow-hidden py-0">
             <Table>
               <TableHeader><TableRow><TableHead>Account</TableHead><TableHead>Type</TableHead><TableHead className="text-right">Debit</TableHead><TableHead className="text-right">Credit</TableHead></TableRow></TableHeader>
@@ -222,13 +385,16 @@ export function ReportsView() {
         </TabsContent>
 
         <TabsContent value="ledger" className="space-y-3">
-          <Select value={accountFilter} onValueChange={(value) => setAccountFilter(value ?? "all")}>
-            <SelectTrigger className="w-72"><SelectValue /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All accounts</SelectItem>
-              {accounts.map((account) => <SelectItem key={account.id} value={account.id}>{account.code} - {account.name}</SelectItem>)}
-            </SelectContent>
-          </Select>
+          <div className="flex flex-wrap justify-between gap-2">
+            <Select value={accountFilter} onValueChange={(value) => setAccountFilter(value ?? "all")}>
+              <SelectTrigger className="w-72"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All accounts</SelectItem>
+                {accounts.map((account) => <SelectItem key={account.id} value={account.id}>{account.code} - {account.name}</SelectItem>)}
+              </SelectContent>
+            </Select>
+            <ExportButton label="Export Ledger" onClick={exportGeneralLedger} />
+          </div>
           <Card className="overflow-hidden py-0">
             <Table>
               <TableHeader><TableRow><TableHead>Date</TableHead><TableHead>Account</TableHead><TableHead>Description</TableHead><TableHead className="text-right">Debit</TableHead><TableHead className="text-right">Credit</TableHead><TableHead className="text-right">Running</TableHead></TableRow></TableHeader>
@@ -237,41 +403,57 @@ export function ReportsView() {
           </Card>
         </TabsContent>
 
-        <TabsContent value="profit" className="grid gap-3 lg:grid-cols-2">
-          <Card className="overflow-hidden py-0"><SectionTable section={profit.revenue} /></Card>
-          <Card className="overflow-hidden py-0"><SectionTable section={profit.expenses} /></Card>
-          <Card className="lg:col-span-2"><CardContent className="flex flex-wrap items-center justify-between gap-3 p-4"><span className="font-semibold">Net Profit / Loss</span><Amount value={profit.netProfitLoss} colorBySign className="text-lg font-semibold" /></CardContent></Card>
+        <TabsContent value="profit" className="space-y-3">
+          <div className="flex justify-end"><ExportButton label="Export Profit or Loss" onClick={exportProfitOrLoss} /></div>
+          <div className="grid gap-3 lg:grid-cols-2">
+            <Card className="overflow-hidden py-0"><SectionTable section={profit.revenue} /></Card>
+            <Card className="overflow-hidden py-0"><SectionTable section={profit.expenses} /></Card>
+            <Card className="lg:col-span-2"><CardContent className="flex flex-wrap items-center justify-between gap-3 p-4"><span className="font-semibold">Net Profit / Loss</span><Amount value={profit.netProfitLoss} colorBySign className="text-lg font-semibold" /></CardContent></Card>
+          </div>
         </TabsContent>
 
-        <TabsContent value="position" className="grid gap-3 lg:grid-cols-3">
-          <Card className="overflow-hidden py-0"><SectionTable section={position.assets} /></Card>
-          <Card className="overflow-hidden py-0"><SectionTable section={position.liabilities} /></Card>
-          <Card className="overflow-hidden py-0"><SectionTable section={position.equity} /></Card>
+        <TabsContent value="position" className="space-y-3">
+          <div className="flex justify-end"><ExportButton label="Export Position" onClick={exportFinancialPosition} /></div>
+          <div className="grid gap-3 lg:grid-cols-3">
+            <Card className="overflow-hidden py-0"><SectionTable section={position.assets} /></Card>
+            <Card className="overflow-hidden py-0"><SectionTable section={position.liabilities} /></Card>
+            <Card className="overflow-hidden py-0"><SectionTable section={position.equity} /></Card>
+          </div>
         </TabsContent>
 
-        <TabsContent value="cash" className="grid gap-3 lg:grid-cols-3">
-          <Card className="overflow-hidden py-0"><SectionTable section={cashFlow.operatingActivities} /></Card>
-          <Card className="overflow-hidden py-0"><SectionTable section={cashFlow.investingActivities} /></Card>
-          <Card className="overflow-hidden py-0"><SectionTable section={cashFlow.financingActivities} /></Card>
-          <Card className="lg:col-span-3"><CardContent className="grid gap-3 p-4 md:grid-cols-3"><div><p className="text-xs text-muted-foreground">Opening Cash</p><Amount value={cashFlow.openingCash} className="font-semibold" /></div><div><p className="text-xs text-muted-foreground">Net Movement</p><Amount value={cashFlow.netCashMovement} colorBySign className="font-semibold" /></div><div><p className="text-xs text-muted-foreground">Closing Cash</p><Amount value={cashFlow.closingCash} className="font-semibold" /></div></CardContent></Card>
+        <TabsContent value="cash" className="space-y-3">
+          <div className="flex justify-end"><ExportButton label="Export Cash Flows" onClick={exportCashFlow} /></div>
+          <div className="grid gap-3 lg:grid-cols-3">
+            <Card className="overflow-hidden py-0"><SectionTable section={cashFlow.operatingActivities} /></Card>
+            <Card className="overflow-hidden py-0"><SectionTable section={cashFlow.investingActivities} /></Card>
+            <Card className="overflow-hidden py-0"><SectionTable section={cashFlow.financingActivities} /></Card>
+            <Card className="lg:col-span-3"><CardContent className="grid gap-3 p-4 md:grid-cols-3"><div><p className="text-xs text-muted-foreground">Opening Cash</p><Amount value={cashFlow.openingCash} className="font-semibold" /></div><div><p className="text-xs text-muted-foreground">Net Movement</p><Amount value={cashFlow.netCashMovement} colorBySign className="font-semibold" /></div><div><p className="text-xs text-muted-foreground">Closing Cash</p><Amount value={cashFlow.closingCash} className="font-semibold" /></div></CardContent></Card>
+          </div>
         </TabsContent>
 
-        <TabsContent value="equity">
+        <TabsContent value="equity" className="space-y-3">
+          <div className="flex justify-end"><ExportButton label="Export Equity" onClick={exportEquity} /></div>
           <Card><CardContent className="grid gap-3 p-4 md:grid-cols-5"><div><p className="text-xs text-muted-foreground">Opening Equity</p><Amount value={equity.openingEquity} /></div><div><p className="text-xs text-muted-foreground">Capital</p><Amount value={equity.capitalIntroduced} /></div><div><p className="text-xs text-muted-foreground">Withdrawals</p><Amount value={equity.withdrawals} /></div><div><p className="text-xs text-muted-foreground">Net Profit / Loss</p><Amount value={equity.netProfitLoss} colorBySign /></div><div><p className="text-xs text-muted-foreground">Closing Equity</p><Amount value={equity.closingEquity} /></div></CardContent></Card>
         </TabsContent>
 
-        <TabsContent value="notes" className="grid gap-3 lg:grid-cols-2">
-          {notes.map((note) => (
-            <Card key={note.id} className="overflow-hidden py-0">
-              <div className="border-b border-border px-4 py-3 font-semibold">{note.title}</div>
-              <Table><TableBody>{note.rows.map((row) => <TableRow key={`${note.id}-${row.label}`}><TableCell>{row.label}<p className="text-xs text-muted-foreground">{row.note}</p></TableCell><TableCell className="text-right"><Amount value={row.amount} /></TableCell></TableRow>)}</TableBody></Table>
-            </Card>
-          ))}
+        <TabsContent value="notes" className="space-y-3">
+          <div className="flex justify-end"><ExportButton label="Export Notes" onClick={exportNotes} /></div>
+          <div className="grid gap-3 lg:grid-cols-2">
+            {notes.map((note) => (
+              <Card key={note.id} className="overflow-hidden py-0">
+                <div className="border-b border-border px-4 py-3 font-semibold">{note.title}</div>
+                <Table><TableBody>{note.rows.map((row) => <TableRow key={`${note.id}-${row.label}`}><TableCell>{row.label}<p className="text-xs text-muted-foreground">{row.note}</p></TableCell><TableCell className="text-right"><Amount value={row.amount} /></TableCell></TableRow>)}</TableBody></Table>
+              </Card>
+            ))}
+          </div>
         </TabsContent>
 
         <TabsContent value="assets" className="space-y-3">
           <div className="flex flex-wrap justify-between gap-2">
-            <Button variant="outline" onClick={() => void generateDepreciationSchedules(throughDate)}><CalendarDays className="size-4" />Generate Depreciation</Button>
+            <div className="flex flex-wrap gap-2">
+              <Button variant="outline" onClick={() => void generateDepreciationSchedules(throughDate)}><CalendarDays className="size-4" />Generate Depreciation</Button>
+              <ExportButton label="Export Assets" onClick={exportFixedAssets} />
+            </div>
             <div className="flex gap-2"><Input type="date" value={throughDate} onChange={(event) => setThroughDate(event.target.value)} /><Button onClick={openNewAsset}><Plus className="size-4" />New Asset</Button></div>
           </div>
           <Card className="overflow-hidden py-0">
@@ -292,7 +474,10 @@ export function ReportsView() {
           <Card><CardContent className="grid gap-3 p-4 md:grid-cols-5"><div><p className="text-xs text-muted-foreground">Revenue</p><Amount value={closePreview.revenueTotal} /></div><div><p className="text-xs text-muted-foreground">Expenses</p><Amount value={closePreview.expenseTotal} /></div><div><p className="text-xs text-muted-foreground">Net Income</p><Amount value={closePreview.netIncome} colorBySign /></div><div><p className="text-xs text-muted-foreground">Warnings</p><p className="text-sm">{closePreview.alreadyClosed ? "Already closed" : closePreview.draftDepreciationCount > 0 ? `${closePreview.draftDepreciationCount} draft depreciation` : closePreview.trialBalanceBalanced ? "Ready" : "Trial balance issue"}</p></div><div className="grid gap-1"><Label>Retained Earnings</Label><Select value={retainedEarningsAccountId} onValueChange={(value) => setRetainedEarningsAccountId(value ?? DEFAULT_RETAINED_EARNINGS_ACCOUNT_ID)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{equityAccounts.map((account) => <SelectItem key={account.id} value={account.id}>{account.code} - {account.name}</SelectItem>)}</SelectContent></Select></div></CardContent></Card>
           <Card className="overflow-hidden py-0"><Table><TableHeader><TableRow><TableHead>Account</TableHead><TableHead className="text-right">Debit</TableHead><TableHead className="text-right">Credit</TableHead></TableRow></TableHeader><TableBody>{closePreview.lines.map((line, index) => <TableRow key={`${line.accountId}-${index}`}><TableCell>{accountName(line.accountId)}</TableCell><TableCell className="text-right"><Amount value={line.debit} /></TableCell><TableCell className="text-right"><Amount value={line.credit} /></TableCell></TableRow>)}</TableBody></Table></Card>
           {closeMessage ? <p className="text-sm text-muted-foreground">{closeMessage}</p> : null}
-          <Button onClick={() => setPendingClose(true)} disabled={closePreview.alreadyClosed || closePreview.draftDepreciationCount > 0 || !closePreview.trialBalanceBalanced}><Landmark className="size-4" />Post Period Close</Button>
+          <div className="flex flex-wrap gap-2">
+            <ExportButton label="Export Close Preview" onClick={exportClosePreview} />
+            <Button onClick={() => setPendingClose(true)} disabled={closePreview.alreadyClosed || closePreview.draftDepreciationCount > 0 || !closePreview.trialBalanceBalanced}><Landmark className="size-4" />Post Period Close</Button>
+          </div>
         </TabsContent>
       </Tabs>
 
