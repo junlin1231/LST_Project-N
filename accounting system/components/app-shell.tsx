@@ -6,6 +6,7 @@ import { useState, type ReactNode } from "react"
 import {
   CircleDollarSign,
   FileText,
+  Files,
   LayoutDashboard,
   Menu,
   Package,
@@ -22,6 +23,7 @@ const NAV = [
   { href: "/journal", label: "Journal", icon: ReceiptText },
   { href: "/receivable", label: "Receivable", icon: FileText },
   { href: "/payable", label: "Payable", icon: CircleDollarSign },
+  { href: "/documents", label: "Documents", icon: Files },
   { href: "/stock", label: "Stock", icon: Package },
   { href: "/reports", label: "Reports", icon: BarChart3 },
   { href: "/settings", label: "Settings", icon: Settings },

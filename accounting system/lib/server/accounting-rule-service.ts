@@ -44,36 +44,67 @@ async function exec(db: DbExecutor, sql: string, values?: unknown[]) {
   return db.query(sql, values)
 }
 
+async function seedDefaultRuleAccounts(db: DbExecutor) {
+  const accounts = [
+    { id: DEFAULT_ACCOUNTING_RULE_CONFIG.accountsReceivableAccountId, code: "1200", name: "Accounts Receivable", type: "asset" },
+    { id: DEFAULT_ACCOUNTING_RULE_CONFIG.cashAccountId, code: "1010", name: "Cash / Bank", type: "asset" },
+    { id: DEFAULT_ACCOUNTING_RULE_CONFIG.revenueAccountId, code: "4000", name: "Sales Revenue", type: "revenue" },
+    { id: DEFAULT_ACCOUNTING_RULE_CONFIG.taxPayableAccountId, code: "2100", name: "Tax Payable", type: "liability" },
+    { id: DEFAULT_ACCOUNTING_RULE_CONFIG.expenseAccountId, code: "5300", name: "General Expenses", type: "expense" },
+    { id: DEFAULT_ACCOUNTING_RULE_CONFIG.accountsPayableAccountId, code: "2000", name: "Accounts Payable", type: "liability" },
+  ]
+
+  await exec(db, "INSERT INTO companies (id, name, base_currency) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING", [
+    DEFAULT_COMPANY_ID,
+    "Demo Company",
+    "MYR",
+  ])
+
+  for (const account of accounts) {
+    await exec(
+      db,
+      `INSERT INTO accounts (id, company_id, code, name, type)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (id) DO NOTHING`,
+      [account.id, DEFAULT_COMPANY_ID, account.code, account.name, account.type],
+    )
+  }
+}
+
 export async function seedDefaultRuleMapping() {
   await ensureDatabaseReady()
-  await query(
-    `INSERT INTO accounting_rule_mappings (
-      id,
-      company_id,
-      ruleset_name,
-      version,
-      accounts_receivable_account_id,
-      cash_account_id,
-      revenue_account_id,
-      tax_payable_account_id,
-      expense_account_id,
-      accounts_payable_account_id,
-      is_active
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, TRUE)
-    ON CONFLICT (company_id, ruleset_name, version) DO NOTHING`,
-    [
-      "rule-map-default-v1",
-      DEFAULT_COMPANY_ID,
-      DEFAULT_ACCOUNTING_RULE_CONFIG.rulesetName,
-      DEFAULT_ACCOUNTING_RULE_CONFIG.version,
-      DEFAULT_ACCOUNTING_RULE_CONFIG.accountsReceivableAccountId,
-      DEFAULT_ACCOUNTING_RULE_CONFIG.cashAccountId,
-      DEFAULT_ACCOUNTING_RULE_CONFIG.revenueAccountId,
-      DEFAULT_ACCOUNTING_RULE_CONFIG.taxPayableAccountId,
-      DEFAULT_ACCOUNTING_RULE_CONFIG.expenseAccountId,
-      DEFAULT_ACCOUNTING_RULE_CONFIG.accountsPayableAccountId,
-    ],
-  )
+  await transaction(async (client) => {
+    await seedDefaultRuleAccounts(client)
+    await exec(
+      client,
+      `INSERT INTO accounting_rule_mappings (
+        id,
+        company_id,
+        ruleset_name,
+        version,
+        accounts_receivable_account_id,
+        cash_account_id,
+        revenue_account_id,
+        tax_payable_account_id,
+        expense_account_id,
+        accounts_payable_account_id,
+        is_active
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, TRUE)
+      ON CONFLICT (company_id, ruleset_name, version) DO NOTHING`,
+      [
+        "rule-map-default-v1",
+        DEFAULT_COMPANY_ID,
+        DEFAULT_ACCOUNTING_RULE_CONFIG.rulesetName,
+        DEFAULT_ACCOUNTING_RULE_CONFIG.version,
+        DEFAULT_ACCOUNTING_RULE_CONFIG.accountsReceivableAccountId,
+        DEFAULT_ACCOUNTING_RULE_CONFIG.cashAccountId,
+        DEFAULT_ACCOUNTING_RULE_CONFIG.revenueAccountId,
+        DEFAULT_ACCOUNTING_RULE_CONFIG.taxPayableAccountId,
+        DEFAULT_ACCOUNTING_RULE_CONFIG.expenseAccountId,
+        DEFAULT_ACCOUNTING_RULE_CONFIG.accountsPayableAccountId,
+      ],
+    )
+  })
 }
 
 export async function getActiveRuleConfig() {

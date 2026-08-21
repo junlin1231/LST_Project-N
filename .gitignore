@@ -1,0 +1,12 @@
+# Environment secrets
+.env
+.env.*
+!.env.example
+
+# Accounting app runtime env files
+accounting system/.env
+accounting system/.env.*
+!accounting system/.env.example
+
+# OCR uploads and captured photos
+ocr/scanned_docs/

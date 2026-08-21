@@ -1,6 +1,8 @@
 import "server-only"
 
 import { randomUUID } from "node:crypto"
+import fs from "node:fs/promises"
+import path from "node:path"
 import {
   demoAccounts,
   demoContacts,
@@ -813,7 +815,13 @@ export async function loadDemoData() {
 export async function resetSystemData() {
   await ensureDatabaseReady()
   await ensureDemoCompany()
+  const ocrStorageDir = path.resolve(process.cwd(), "..", "ocr", "scanned_docs", DEFAULT_COMPANY_ID)
   await transaction(async (client) => {
+    await exec(client, "DELETE FROM posting_confirmations WHERE company_id = $1", [DEFAULT_COMPANY_ID])
+    await exec(client, "DELETE FROM document_accounting_drafts WHERE company_id = $1", [DEFAULT_COMPANY_ID])
+    await exec(client, "DELETE FROM document_categories WHERE company_id = $1", [DEFAULT_COMPANY_ID])
+    await exec(client, "DELETE FROM document_extractions WHERE company_id = $1", [DEFAULT_COMPANY_ID])
+    await exec(client, "DELETE FROM documents WHERE company_id = $1", [DEFAULT_COMPANY_ID])
     await exec(client, "DELETE FROM stock_movement_lines WHERE stock_movement_id IN (SELECT id FROM stock_movements WHERE company_id = $1)", [DEFAULT_COMPANY_ID])
     await exec(client, "DELETE FROM stock_movements WHERE company_id = $1", [DEFAULT_COMPANY_ID])
     await exec(client, "DELETE FROM stock_balances WHERE company_id = $1", [DEFAULT_COMPANY_ID])
@@ -847,6 +855,8 @@ export async function resetSystemData() {
     await exec(client, "DELETE FROM accounts WHERE company_id = $1", [DEFAULT_COMPANY_ID])
     await exec(client, "DELETE FROM accounting_periods WHERE company_id = $1", [DEFAULT_COMPANY_ID])
   })
+  await fs.rm(ocrStorageDir, { recursive: true, force: true })
+  await fs.mkdir(ocrStorageDir, { recursive: true })
 }
 
 export async function insertJournalEntry(db: DbExecutor, entry: JournalEntry) {
