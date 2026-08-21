@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useMemo, useRef, useState } from "react"
-import { Camera, Check, FileUp, RefreshCw, Save, Send, X } from "lucide-react"
+import { Camera, Check, FileUp, LoaderCircle, RefreshCw, Save, Send, X } from "lucide-react"
 import { Amount } from "@/components/amount"
 import { PageHeader } from "@/components/page-header"
 import { Badge } from "@/components/ui/badge"
@@ -84,6 +84,8 @@ export function DocumentsView() {
   const [fields, setFields] = useState<NormalizedDocumentFields>(emptyFields)
   const [lines, setLines] = useState<JournalLine[]>([])
   const [busy, setBusy] = useState(false)
+  const [activeAction, setActiveAction] = useState<string | null>(null)
+  const [scanProgress, setScanProgress] = useState(0)
   const [notice, setNotice] = useState<Notice>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const cameraInputRef = useRef<HTMLInputElement>(null)
@@ -93,6 +95,7 @@ export function DocumentsView() {
   const canConfirm = selected?.draft?.status === "draft" || selected?.draft?.status === "rejected"
   const canPost = selected?.draft?.status === "confirmed" && selected.processingStatus !== "posted"
   const warnings = fields.warnings ?? []
+  const isScanning = activeAction === "process"
 
   async function loadDocuments() {
     const next = await readJson<OcrDocument[]>(await fetch("/api/documents", { cache: "no-store" }))
@@ -118,6 +121,19 @@ export function DocumentsView() {
     setFields(selected.draft.normalizedFields)
     setLines(selected.draft.suggestedJournalLines)
   }, [selected])
+
+  useEffect(() => {
+    if (!isScanning) return
+    const interval = window.setInterval(() => {
+      setScanProgress((current) => {
+        if (current < 35) return current + 7
+        if (current < 70) return current + 4
+        if (current < 92) return current + 1
+        return current
+      })
+    }, 800)
+    return () => window.clearInterval(interval)
+  }, [isScanning])
 
   async function selectDocument(id: string) {
     setBusy(true)
@@ -154,12 +170,16 @@ export function DocumentsView() {
 
   async function action(path: string, options?: RequestInit) {
     if (!selected) return
+    const isOcrProcess = path === "process"
     setBusy(true)
+    setActiveAction(path)
+    if (isOcrProcess) setScanProgress(6)
     setNotice(null)
     try {
       const response = await fetch(`/api/documents/${selected.id}/${path}`, options ?? { method: "POST" })
       const body = await readJson<{ detail?: OcrDocumentDetail; journalEntry?: { id: string } } | OcrDocumentDetail>(response)
       const detail = "detail" in body && body.detail ? body.detail : body as OcrDocumentDetail
+      if (isOcrProcess) setScanProgress(100)
       setSelected(detail)
       await loadDocuments()
       setNotice({ type: "success", message: path === "post" ? `Posted journal entry ${"journalEntry" in body ? body.journalEntry?.id ?? "" : ""}`.trim() : "Document updated." })
@@ -167,6 +187,14 @@ export function DocumentsView() {
       setNotice({ type: "error", message: error instanceof Error ? error.message : "Action failed." })
     } finally {
       setBusy(false)
+      if (isOcrProcess) {
+        window.setTimeout(() => {
+          setActiveAction((current) => (current === path ? null : current))
+          setScanProgress(0)
+        }, 700)
+      } else {
+        setActiveAction(null)
+      }
     }
   }
 
@@ -263,8 +291,8 @@ export function DocumentsView() {
                   </div>
                   <div className="flex flex-wrap gap-2">
                     <Button variant="outline" onClick={() => void action("process")} disabled={busy}>
-                      <RefreshCw className="size-4" />
-                      OCR
+                      {isScanning ? <LoaderCircle className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
+                      {isScanning ? "Scanning" : "OCR"}
                     </Button>
                     <Button variant="outline" onClick={saveDraft} disabled={busy || !canEdit}>
                       <Save className="size-4" />
@@ -284,6 +312,8 @@ export function DocumentsView() {
                     </Button>
                   </div>
                 </div>
+
+                {isScanning ? <ScanProgress progress={scanProgress} filename={selected.originalFilename} /> : null}
 
                 <Tabs defaultValue="fields" className="flex-1 p-4">
                   <TabsList className="grid h-auto w-full grid-cols-4">
@@ -410,6 +440,33 @@ function Summary({ label, value }: { label: string; value: number }) {
     <div className="rounded-md border border-border p-3">
       <p className="text-xs text-muted-foreground">{label}</p>
       <Amount value={value} className="mt-1 font-semibold" />
+    </div>
+  )
+}
+
+function ScanProgress({ progress, filename }: { progress: number; filename: string }) {
+  const safeProgress = Math.max(0, Math.min(100, Math.round(progress)))
+
+  return (
+    <div className="border-b border-border bg-muted/30 px-4 py-3">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0">
+          <p className="truncate text-sm font-medium">Scanning {filename}</p>
+          <p className="text-xs text-muted-foreground">Reading document, extracting fields, and preparing the posting preview.</p>
+        </div>
+        <p className="shrink-0 text-sm tabular-nums text-muted-foreground">{safeProgress}%</p>
+      </div>
+      <div className="mt-3 h-2 overflow-hidden rounded-full bg-background">
+        <div
+          className="h-full rounded-full bg-primary transition-all duration-700 ease-out"
+          style={{ width: `${safeProgress}%` }}
+          role="progressbar"
+          aria-label="OCR scanning progress"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={safeProgress}
+        />
+      </div>
     </div>
   )
 }

@@ -4,6 +4,7 @@ import type { DocumentCategory, NormalizedDocumentFields } from "@/lib/accountin
 import { DOCUMENT_CATEGORIES } from "@/lib/accounting/document-types"
 import type { JournalLine } from "@/lib/accounting/types"
 import { getActiveRuleConfig } from "./accounting-rule-service"
+import { chatCompletionsUrl, fetchAiJson } from "./ai-endpoint"
 import { getServerEnv } from "./env"
 
 export interface CategorizationResult {
@@ -101,7 +102,7 @@ async function categorizeWithGemmaEndpoint(input: {
   if (env.aiProvider !== "openai") {
     throw new Error(`Unsupported LLM_PROVIDER for categorization: ${env.aiProvider}.`)
   }
-  const endpoint = new URL(env.aiBaseUrl.replace(/\/$/, "") + "/chat/completions")
+  const endpoint = chatCompletionsUrl(env.aiBaseUrl)
   const headers: Record<string, string> = { "Content-Type": "application/json" }
   if (env.aiApiKey) headers.Authorization = `Bearer ${env.aiApiKey}`
 
@@ -113,7 +114,7 @@ async function categorizeWithGemmaEndpoint(input: {
     "Use unknown if the document is unclear.",
   ].join("\n")
 
-  const response = await fetch(endpoint, {
+  const payload = await fetchAiJson(endpoint, {
     method: "POST",
     headers,
     body: JSON.stringify({
@@ -130,9 +131,7 @@ async function categorizeWithGemmaEndpoint(input: {
         },
       ],
     }),
-  })
-  if (!response.ok) throw new Error(`Gemma categorization endpoint failed with HTTP ${response.status}.`)
-  const payload = await response.json() as { choices?: Array<{ message?: { content?: string } }> }
+  }) as { choices?: Array<{ message?: { content?: string } }> }
   const content = payload.choices?.[0]?.message?.content ?? ""
   const json = extractJsonObject(content)
   if (!json) throw new Error("Gemma categorization endpoint did not return JSON.")
@@ -156,8 +155,9 @@ export class MockCategorizationAdapter implements CategorizationAdapter {
       return null
     }) ?? inferCategory(`${input.rawText}\n${fields.documentNumber ?? ""}\n${fields.lineItems.map((line) => line.description).join(" ")}`)
     const payableAccountId = fields.paymentMethod ? config.cashAccountId : config.accountsPayableAccountId
+    const expenseDebit = Number(Math.max(0, fields.totalAmount - fields.taxAmount).toFixed(2))
     const suggestedJournalLines: JournalLine[] = [
-      { accountId: config.expenseAccountId, debit: fields.subtotal, credit: 0 },
+      { accountId: config.expenseAccountId, debit: expenseDebit, credit: 0 },
       { accountId: config.taxPayableAccountId, debit: fields.taxAmount, credit: 0 },
       { accountId: payableAccountId, debit: 0, credit: fields.totalAmount },
     ].filter((line) => line.debit > 0 || line.credit > 0)

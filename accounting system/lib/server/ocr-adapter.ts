@@ -3,6 +3,7 @@ import "server-only"
 import fs from "node:fs/promises"
 import path from "node:path"
 import type { NormalizedDocumentFields } from "@/lib/accounting/document-types"
+import { chatCompletionsUrl, fetchAiJson } from "./ai-endpoint"
 import { getServerEnv } from "./env"
 
 export interface OcrResult {
@@ -57,7 +58,7 @@ async function extractLocalText(input: { filePath: string; mimeType: string }) {
   return ""
 }
 
-function buildFallbackFields(input: { rawText: string; originalFilename: string }) {
+function buildFallbackFields(input: { rawText: string; originalFilename: string; aiWarning?: string }) {
   const baseName = path.basename(input.originalFilename, path.extname(input.originalFilename))
   const totalAmount = inferAmount(input.rawText)
   const subtotal = totalAmount > 0 ? Number((totalAmount / 1.06).toFixed(2)) : 0
@@ -67,6 +68,7 @@ function buildFallbackFields(input: { rawText: string; originalFilename: string 
   const warnings = totalAmount > 0
     ? []
     : ["Amount was not detected locally. Configure the Gemma endpoint or enter totals before posting."]
+  if (input.aiWarning) warnings.unshift(input.aiWarning)
 
   return {
     documentDate: today(),
@@ -106,6 +108,16 @@ function stringValue(value: unknown, fallback = "") {
   return typeof value === "string" ? value : fallback
 }
 
+function optionalStringValue(value: unknown, fallback = "") {
+  const text = stringValue(value, fallback).trim()
+  return text === "0" ? "" : text
+}
+
+function dateValue(value: unknown, fallback = "") {
+  const text = optionalStringValue(value)
+  return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : fallback
+}
+
 function normalizeAiFields(json: Record<string, unknown>): Partial<NormalizedDocumentFields> {
   const rawItems = Array.isArray(json.lineItems) ? json.lineItems : []
   const lineItems = rawItems.map((item) => {
@@ -119,18 +131,29 @@ function normalizeAiFields(json: Record<string, unknown>): Partial<NormalizedDoc
       lineTotal: numberValue(record.lineTotal),
     }
   })
-  const subtotal = numberValue(json.subtotal, lineItems.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0))
+  let subtotal = numberValue(json.subtotal, lineItems.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0))
   const taxAmount = numberValue(json.taxAmount, lineItems.reduce((sum, item) => sum + item.taxAmount, 0))
   const totalAmount = numberValue(json.totalAmount, subtotal + taxAmount)
+  const roundingDifference = Number((totalAmount - subtotal - taxAmount).toFixed(2))
+  if (totalAmount > 0 && Math.abs(roundingDifference) > 0 && Math.abs(roundingDifference) <= 0.05) {
+    subtotal = Number((totalAmount - taxAmount).toFixed(2))
+    if (lineItems.length === 1) {
+      lineItems[0] = {
+        ...lineItems[0],
+        unitPrice: subtotal,
+        lineTotal: totalAmount,
+      }
+    }
+  }
 
   return {
-    documentDate: stringValue(json.documentDate, today()),
-    dueDate: stringValue(json.dueDate),
+    documentDate: dateValue(json.documentDate, today()),
+    dueDate: dateValue(json.dueDate),
     documentNumber: stringValue(json.documentNumber),
     currency: stringValue(json.currency, "MYR"),
-    vendorName: stringValue(json.vendorName),
-    clientName: stringValue(json.clientName),
-    taxId: stringValue(json.taxId),
+    vendorName: optionalStringValue(json.vendorName),
+    clientName: optionalStringValue(json.clientName),
+    taxId: optionalStringValue(json.taxId),
     subtotal: Number(subtotal.toFixed(2)),
     taxAmount: Number(taxAmount.toFixed(2)),
     totalAmount: Number(totalAmount.toFixed(2)),
@@ -149,7 +172,7 @@ async function extractWithGemmaEndpoint(input: { filePath: string; mimeType: str
 
   const bytes = await fs.readFile(input.filePath)
   const base64 = bytes.toString("base64")
-  const endpoint = new URL(env.aiBaseUrl.replace(/\/$/, "") + "/chat/completions")
+  const endpoint = chatCompletionsUrl(env.aiBaseUrl)
   const headers: Record<string, string> = { "Content-Type": "application/json" }
   if (env.aiApiKey) headers.Authorization = `Bearer ${env.aiApiKey}`
 
@@ -162,7 +185,7 @@ async function extractWithGemmaEndpoint(input: { filePath: string; mimeType: str
     "Use MYR when currency is unclear. Use YYYY-MM-DD dates. Use 0 for unknown numeric values.",
   ].join("\n")
 
-  const response = await fetch(endpoint, {
+  const payload = await fetchAiJson(endpoint, {
     method: "POST",
     headers,
     body: JSON.stringify({
@@ -179,12 +202,7 @@ async function extractWithGemmaEndpoint(input: { filePath: string; mimeType: str
         },
       ],
     }),
-  })
-
-  if (!response.ok) {
-    throw new Error(`Gemma OCR endpoint failed with HTTP ${response.status}.`)
-  }
-  const payload = await response.json() as { choices?: Array<{ message?: { content?: string } }> }
+  }, 120_000) as { choices?: Array<{ message?: { content?: string } }> }
   const content = payload.choices?.[0]?.message?.content ?? ""
   const json = extractJsonObject(content)
   if (!json) throw new Error("Gemma OCR endpoint did not return JSON.")
@@ -200,7 +218,12 @@ async function extractWithGemmaEndpoint(input: { filePath: string; mimeType: str
 
 export class MockOcrAdapter implements OcrAdapter {
   async extract(input: { filePath: string; mimeType: string; originalFilename: string }): Promise<OcrResult> {
+    const env = getServerEnv()
+    let aiWarning = !env.aiBaseUrl
+      ? "AI OCR is not configured. Add URL, LLM_MODEL, LLM_PROVIDER, and BEARER_TOKEN to accounting system/.env.local, then restart the dev server."
+      : undefined
     const aiResult = await extractWithGemmaEndpoint(input).catch((error) => {
+      aiWarning = error instanceof Error ? `AI OCR failed: ${error.message}` : "AI OCR failed."
       console.error(error)
       return null
     })
@@ -209,7 +232,7 @@ export class MockOcrAdapter implements OcrAdapter {
     const baseName = path.basename(input.originalFilename, path.extname(input.originalFilename))
     const fileText = await extractLocalText(input)
     const rawText = [fileText.trim(), baseName.replace(/[-_]+/g, " ")].filter(Boolean).join("\n") || `Captured document ${input.originalFilename}`
-    const fields = buildFallbackFields({ rawText: fileText.trim(), originalFilename: input.originalFilename })
+    const fields = buildFallbackFields({ rawText: fileText.trim(), originalFilename: input.originalFilename, aiWarning })
 
     return {
       rawText,

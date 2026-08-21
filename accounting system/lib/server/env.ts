@@ -1,5 +1,8 @@
 import "server-only"
 
+import fs from "node:fs"
+import path from "node:path"
+
 export interface ServerEnv {
   databaseUrl: string
   autoMigrate: boolean
@@ -9,8 +12,34 @@ export interface ServerEnv {
   aiProvider: string
 }
 
+function readLocalEnvFile() {
+  const envPath = path.join(process.cwd(), ".env.local")
+  if (!fs.existsSync(envPath)) return {}
+  const content = fs.readFileSync(envPath, "utf8")
+  const values: Record<string, string> = {}
+  for (const line of content.split(/\r?\n/)) {
+    const trimmed = line.trim()
+    if (!trimmed || trimmed.startsWith("#")) continue
+    const separator = trimmed.indexOf("=")
+    if (separator <= 0) continue
+    const key = trimmed.slice(0, separator).trim()
+    const value = trimmed.slice(separator + 1).trim().replace(/^['"]|['"]$/g, "")
+    values[key] = value
+  }
+  return values
+}
+
+function envValue(values: Record<string, string>, ...names: string[]) {
+  for (const name of names) {
+    const value = process.env[name] ?? values[name]
+    if (value && value.trim()) return value.trim()
+  }
+  return undefined
+}
+
 export function getServerEnv(): ServerEnv {
-  const databaseUrl = process.env.DATABASE_URL
+  const localEnv = readLocalEnvFile()
+  const databaseUrl = envValue(localEnv, "DATABASE_URL")
 
   if (!databaseUrl) {
     throw new Error("DATABASE_URL is required for database-backed accounting operations.")
@@ -28,7 +57,7 @@ export function getServerEnv(): ServerEnv {
     throw new Error("DATABASE_URL must be a valid PostgreSQL connection URL.")
   }
 
-  const aiBaseUrl = process.env.URL || process.env.AI_BASE_URL
+  const aiBaseUrl = envValue(localEnv, "URL", "AI_BASE_URL")
   if (aiBaseUrl) {
     try {
       new URL(aiBaseUrl)
@@ -39,10 +68,10 @@ export function getServerEnv(): ServerEnv {
 
   return {
     databaseUrl,
-    autoMigrate: process.env.AUTO_MIGRATE === "1",
+    autoMigrate: envValue(localEnv, "AUTO_MIGRATE") === "1",
     aiBaseUrl,
-    aiApiKey: process.env.BEARER_TOKEN || process.env.AI_API_KEY,
-    aiModel: process.env.LLM_MODEL || process.env.LLM_GEMMA4_MODEL || process.env.AI_MODEL || "gemma-4",
-    aiProvider: process.env.LLM_PROVIDER || "openai",
+    aiApiKey: envValue(localEnv, "BEARER_TOKEN", "AI_API_KEY"),
+    aiModel: envValue(localEnv, "LLM_MODEL", "LLM_GEMMA4_MODEL", "AI_MODEL") ?? "gemma-4",
+    aiProvider: (envValue(localEnv, "LLM_PROVIDER") ?? "openai").toLowerCase(),
   }
 }

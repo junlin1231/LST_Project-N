@@ -410,7 +410,7 @@ function validateFields(input: NormalizedDocumentFields): NormalizedDocumentFiel
     lineTotal: Number(line.lineTotal),
   }))
   const warnings: string[] = []
-  if (!input.documentDate) warnings.push("Document date is required.")
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(input.documentDate)) warnings.push("Document date is required.")
   if (!Number.isFinite(totalAmount) || totalAmount <= 0) warnings.push("Total amount must be greater than zero.")
   if (lineItems.some((line) => !line.description)) warnings.push("Every line needs a description.")
   if (lineItems.some((line) => !Number.isFinite(line.quantity) || line.quantity <= 0)) warnings.push("Line quantity must be greater than zero.")
