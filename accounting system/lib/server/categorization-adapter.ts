@@ -26,14 +26,16 @@ export interface CategorizationAdapter {
 }
 
 type CategoryDecision = Pick<CategorizationResult, "category" | "confidence" | "reason" | "rawOutput" | "modelName" | "modelVersion">
+type TransferDirection = "incoming" | "outgoing" | null
 
 function normalizeFields(fields: Partial<NormalizedDocumentFields>): NormalizedDocumentFields {
   const lineItems = fields.lineItems?.length
     ? fields.lineItems
     : [{ description: "Document line", quantity: 1, unitPrice: 0, taxRate: 0, taxAmount: 0, lineTotal: 0 }]
   const subtotal = Number(fields.subtotal ?? lineItems.reduce((sum, line) => sum + line.quantity * line.unitPrice, 0).toFixed(2))
+  const otherCharges = Number(fields.otherCharges ?? 0)
   const taxAmount = Number(fields.taxAmount ?? lineItems.reduce((sum, line) => sum + line.taxAmount, 0).toFixed(2))
-  const totalAmount = Number(fields.totalAmount ?? (subtotal + taxAmount).toFixed(2))
+  const totalAmount = Number(fields.totalAmount ?? (subtotal + otherCharges + taxAmount).toFixed(2))
 
   return {
     documentDate: fields.documentDate || new Date().toISOString().slice(0, 10),
@@ -44,6 +46,7 @@ function normalizeFields(fields: Partial<NormalizedDocumentFields>): NormalizedD
     clientName: fields.clientName || "",
     taxId: fields.taxId || "",
     subtotal,
+    otherCharges,
     taxAmount,
     totalAmount,
     paymentMethod: fields.paymentMethod || "",
@@ -52,20 +55,68 @@ function normalizeFields(fields: Partial<NormalizedDocumentFields>): NormalizedD
   }
 }
 
+function normalizeName(value: string) {
+  return value.toUpperCase().replace(/[^A-Z0-9]+/g, " ").replace(/\s+/g, " ").trim()
+}
+
+function matchesOwnAlias(value: string, aliases: string[]) {
+  const normalizedValue = normalizeName(value)
+  return aliases.some((alias) => {
+    const normalizedAlias = normalizeName(alias)
+    return normalizedAlias.length >= 3 && normalizedValue.includes(normalizedAlias)
+  })
+}
+
+function partyText(rawText: string, labels: string[]) {
+  const lines = rawText.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+  const matches: string[] = []
+  for (const line of lines) {
+    const normalizedLine = normalizeName(line)
+    for (const label of labels) {
+      const normalizedLabel = normalizeName(label)
+      if (normalizedLine.startsWith(normalizedLabel) || normalizedLine.includes(` ${normalizedLabel} `)) {
+        matches.push(line)
+      }
+    }
+  }
+  return matches.join("\n")
+}
+
+function detectTransferDirection(rawText: string, ownAliases: string[]): TransferDirection {
+  if (ownAliases.length === 0) return null
+  const senderText = partyText(rawText, ["sender", "from", "payer", "paid by", "transfer from", "debited from", "account holder"])
+  const receiverText = partyText(rawText, ["receiver", "recipient", "payee", "to", "transfer to", "credited to", "received by"])
+  const senderIsOwn = matchesOwnAlias(senderText, ownAliases)
+  const receiverIsOwn = matchesOwnAlias(receiverText, ownAliases)
+
+  if (receiverIsOwn && !senderIsOwn) return "incoming"
+  if (senderIsOwn && !receiverIsOwn) return "outgoing"
+  return null
+}
+
 function inferCategory(text: string): CategoryDecision {
   const lower = text.toLowerCase()
-  const decision = lower.includes("petrol") || lower.includes("fuel")
-    ? { category: "petrol" as const, confidence: 0.91, reason: "Detected petrol/fuel terms." }
-    : lower.includes("entertain")
-      ? { category: "entertainment" as const, confidence: 0.88, reason: "Detected entertainment terms." }
-      : lower.includes("invoice")
-        ? { category: "vendor_bill" as const, confidence: 0.78, reason: "Detected invoice terms; user should verify AP/AR direction." }
-        : lower.includes("receipt")
-          ? { category: "receipt_expense" as const, confidence: 0.82, reason: "Detected receipt terms." }
-          : { category: "unknown" as const, confidence: 0.45, reason: "No confident category terms were detected." }
+  const direction = detectTransferDirection(text, getServerEnv().ownEntityNames)
+  const isSingleOutgoingTransfer = direction === "outgoing" || lower.includes("duitnow") || lower.includes("fund transfer") || lower.includes("transfer to") || lower.includes("transferred")
+  const isIncomingTransfer = direction === "incoming" || lower.includes("received") || lower.includes("payment received") || lower.includes("credit advice") || lower.includes("receipt voucher")
+  const decision = lower.includes("bank statement")
+    ? { category: "bank_document" as const, confidence: 0.82, reason: "Detected bank statement terms." }
+    : isIncomingTransfer
+      ? { category: "receipt_income" as const, confidence: 0.86, reason: "Detected money received terms." }
+      : isSingleOutgoingTransfer
+        ? { category: "receipt_expense" as const, confidence: 0.84, reason: "Detected a single outgoing bank or e-wallet transfer." }
+        : lower.includes("petrol") || lower.includes("fuel")
+          ? { category: "petrol" as const, confidence: 0.91, reason: "Detected petrol/fuel terms." }
+          : lower.includes("entertain")
+            ? { category: "entertainment" as const, confidence: 0.88, reason: "Detected entertainment terms." }
+            : lower.includes("invoice")
+              ? { category: "vendor_bill" as const, confidence: 0.78, reason: "Detected invoice terms; user should verify AP/AR direction." }
+              : lower.includes("receipt")
+                ? { category: "receipt_expense" as const, confidence: 0.82, reason: "Detected receipt terms." }
+                : { category: "unknown" as const, confidence: 0.45, reason: "No confident category terms were detected." }
   return {
     ...decision,
-    rawOutput: { adapter: "mock", inferred: decision },
+    rawOutput: { adapter: "mock", inferred: decision, transferDirection: direction },
     modelName: "mock-gemma-4-adapter",
     modelVersion: "local-dev",
   }
@@ -93,6 +144,37 @@ function numberValue(value: unknown, fallback: number) {
   return Number.isFinite(number) ? number : fallback
 }
 
+function refineBankTransferCategory(decision: CategoryDecision, rawText: string): CategoryDecision {
+  if (decision.category !== "bank_document" && decision.category !== "unknown") return decision
+  const env = getServerEnv()
+  const direction = detectTransferDirection(rawText, env.ownEntityNames)
+  const lower = rawText.toLowerCase()
+  const looksLikeStatement = lower.includes("bank statement") || lower.includes("opening balance") || lower.includes("closing balance")
+  const incoming = direction === "incoming" || lower.includes("received") || lower.includes("payment received") || lower.includes("credit advice")
+  const outgoing = direction === "outgoing" || lower.includes("duitnow") || lower.includes("fund transfer") || lower.includes("transfer to") || lower.includes("transferred")
+
+  if (looksLikeStatement) return decision
+  if (incoming) {
+    return {
+      ...decision,
+      category: "receipt_income",
+      confidence: Math.max(decision.confidence, 0.86),
+      reason: `${decision.reason} Treated as incoming because receiver/payee matches your alias or receipt terms indicate money received.`,
+      rawOutput: { ...decision.rawOutput, transferDirection: direction ?? "incoming-keyword" },
+    }
+  }
+  if (outgoing) {
+    return {
+      ...decision,
+      category: "receipt_expense",
+      confidence: Math.max(decision.confidence, 0.84),
+      reason: `${decision.reason} Treated as outgoing because sender/payer matches your alias or transfer terms indicate money paid.`,
+      rawOutput: { ...decision.rawOutput, transferDirection: direction ?? "outgoing-keyword" },
+    }
+  }
+  return decision
+}
+
 async function categorizeWithGemmaEndpoint(input: {
   rawText: string
   extractedFields: Partial<NormalizedDocumentFields>
@@ -106,11 +188,19 @@ async function categorizeWithGemmaEndpoint(input: {
   const headers: Record<string, string> = { "Content-Type": "application/json" }
   if (env.aiApiKey) headers.Authorization = `Bearer ${env.aiApiKey}`
 
+  const aliasHint = env.ownEntityNames.length > 0
+    ? `Own company/person aliases for direction detection: ${env.ownEntityNames.join(", ")}. If receiver/payee matches these aliases, classify as receipt_income. If sender/payer/from matches these aliases, classify as receipt_expense.`
+    : "If sender/receiver direction is unclear, prefer bank_document for bank records."
   const system = [
     "You categorize OCR accounting documents and receipts.",
     "Return only JSON with category, confidence, reason.",
     `category must be one of: ${DOCUMENT_CATEGORIES.join(", ")}.`,
+    aliasHint,
+    "Use receipt_income when money is received, including customer payment receipts and bank credits.",
+    "Use receipt_expense for a single outgoing bank transfer, DuitNow payment, e-wallet transfer, or paid expense record.",
+    "Use bank_document only for multi-transaction bank statements or unclear bank documents that need user choice.",
     "Use petrol for fuel receipts and entertainment for meal/client entertainment receipts.",
+    "Use receipt_expense for simple paid expense receipts such as restaurants, parking, office supplies, or delivery fees.",
     "Use unknown if the document is unclear.",
   ].join("\n")
 
@@ -150,17 +240,12 @@ export class MockCategorizationAdapter implements CategorizationAdapter {
   async categorize(input: { rawText: string; extractedFields: Partial<NormalizedDocumentFields> }): Promise<CategorizationResult> {
     const fields = normalizeFields(input.extractedFields)
     const config = await getActiveRuleConfig()
-    const inferred = await categorizeWithGemmaEndpoint(input).catch((error) => {
+    const inferred = refineBankTransferCategory(await categorizeWithGemmaEndpoint(input).catch((error) => {
       console.error(error)
       return null
-    }) ?? inferCategory(`${input.rawText}\n${fields.documentNumber ?? ""}\n${fields.lineItems.map((line) => line.description).join(" ")}`)
-    const payableAccountId = fields.paymentMethod ? config.cashAccountId : config.accountsPayableAccountId
+    }) ?? inferCategory(`${input.rawText}\n${fields.documentNumber ?? ""}\n${fields.lineItems.map((line) => line.description).join(" ")}`), input.rawText)
     const expenseDebit = Number(Math.max(0, fields.totalAmount - fields.taxAmount).toFixed(2))
-    const suggestedJournalLines: JournalLine[] = [
-      { accountId: config.expenseAccountId, debit: expenseDebit, credit: 0 },
-      { accountId: config.taxPayableAccountId, debit: fields.taxAmount, credit: 0 },
-      { accountId: payableAccountId, debit: 0, credit: fields.totalAmount },
-    ].filter((line) => line.debit > 0 || line.credit > 0)
+    const suggestedJournalLines: JournalLine[] = buildSuggestedJournalLines(inferred.category, fields, config, expenseDebit)
 
     return {
       ...inferred,
@@ -174,3 +259,24 @@ export class MockCategorizationAdapter implements CategorizationAdapter {
 }
 
 export const categorizationAdapter = new MockCategorizationAdapter()
+
+function buildSuggestedJournalLines(category: DocumentCategory, fields: NormalizedDocumentFields, config: Awaited<ReturnType<typeof getActiveRuleConfig>>, expenseDebit: number) {
+  if (category === "receipt_income" || category === "sales_invoice") {
+    return [
+      { accountId: config.cashAccountId, debit: fields.totalAmount, credit: 0 },
+      { accountId: config.revenueAccountId, debit: 0, credit: expenseDebit },
+      { accountId: config.taxPayableAccountId, debit: 0, credit: fields.taxAmount },
+    ].filter((line) => line.debit > 0 || line.credit > 0)
+  }
+
+  if (category === "bank_document" || category === "unknown" || category === "tax_document") {
+    return []
+  }
+
+  const payableAccountId = fields.paymentMethod ? config.cashAccountId : config.accountsPayableAccountId
+  return [
+    { accountId: config.expenseAccountId, debit: expenseDebit, credit: 0 },
+    { accountId: config.taxPayableAccountId, debit: fields.taxAmount, credit: 0 },
+    { accountId: payableAccountId, debit: 0, credit: fields.totalAmount },
+  ].filter((line) => line.debit > 0 || line.credit > 0)
+}

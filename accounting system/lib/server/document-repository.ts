@@ -19,8 +19,7 @@ import type {
 import { DOCUMENT_CATEGORIES } from "@/lib/accounting/document-types"
 import type { JournalEntry, JournalLine } from "@/lib/accounting/types"
 import { isJournalEntryBalanced } from "@/lib/accounting/calculations"
-import { postExpenseDocumentByRule } from "./accounting-rule-service"
-import { DEFAULT_COMPANY_ID, DEFAULT_USER_ID } from "./accounting-repository"
+import { DEFAULT_COMPANY_ID, DEFAULT_USER_ID, insertJournalEntry } from "./accounting-repository"
 import { ensureDatabaseReady, query, transaction, type DbExecutor } from "./db"
 import { categorizationAdapter } from "./categorization-adapter"
 import { ocrAdapter } from "./ocr-adapter"
@@ -322,14 +321,49 @@ export async function getDocumentFile(id: string) {
   }
 }
 
+export async function deleteUnpostedDocument(id: string) {
+  await ensureDemoCompany()
+  const row = await getDocumentRow(id)
+  if (!row) throw new Error("Document was not found.")
+  if (row.processing_status === "ocr_processing" || row.processing_status === "posting") {
+    throw new Error("Wait for the current document action to finish before deleting.")
+  }
+  if (row.processing_status === "posted" || row.review_status === "posted") {
+    throw new Error("Posted documents cannot be deleted from OCR storage.")
+  }
+
+  const postedDraft = await query<{ id: string }>(
+    `SELECT id
+     FROM document_accounting_drafts
+     WHERE company_id = $1 AND document_id = $2 AND (status = 'posted' OR journal_entry_id IS NOT NULL)
+     LIMIT 1`,
+    [DEFAULT_COMPANY_ID, id],
+  )
+  if (postedDraft.rows[0]) throw new Error("Documents with posted journal entries cannot be deleted.")
+
+  const root = storageRoot()
+  const resolved = path.resolve(row.storage_path)
+  if (!resolved.startsWith(root)) throw new Error("Document storage path is invalid.")
+
+  await transaction(async (client) => {
+    await exec(client, "DELETE FROM documents WHERE id = $1 AND company_id = $2", [id, DEFAULT_COMPANY_ID])
+  })
+  await fs.unlink(resolved).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== "ENOENT") throw error
+  })
+
+  return { id, deleted: true }
+}
+
 function needsReview(ocrConfidence: number | undefined, categoryConfidence: number, category: DocumentCategory, fields: NormalizedDocumentFields, lines: JournalLine[]) {
   const warnings = [...(fields.warnings ?? [])]
+  const otherCharges = Number(fields.otherCharges ?? 0)
   if ((ocrConfidence ?? 0) < 0.8) warnings.push("OCR confidence is below 80%.")
   if (categoryConfidence < HIGH_CONFIDENCE) warnings.push("Category confidence is below 85%.")
   if (category === "unknown") warnings.push("Category is unknown.")
   if (!fields.documentDate) warnings.push("Document date is required.")
   if (!Number.isFinite(fields.totalAmount) || fields.totalAmount <= 0) warnings.push("Total amount must be greater than zero.")
-  if (Math.abs(Number((fields.subtotal + fields.taxAmount - fields.totalAmount).toFixed(2))) > 0.02) warnings.push("Subtotal plus tax does not match total.")
+  if (Math.abs(Number((fields.subtotal + otherCharges + fields.taxAmount - fields.totalAmount).toFixed(2))) > 0.02) warnings.push("Subtotal plus charges plus tax does not match total.")
   const journalEntry: JournalEntry = { id: "validation", date: fields.documentDate || new Date().toISOString().slice(0, 10), description: "Validation", lines }
   if (lines.length > 0 && !isJournalEntryBalanced(journalEntry)) warnings.push("Suggested journal entry is not balanced.")
   return Array.from(new Set(warnings))
@@ -399,6 +433,7 @@ function validateCategory(value: unknown): DocumentCategory {
 
 function validateFields(input: NormalizedDocumentFields): NormalizedDocumentFields {
   const subtotal = Number(input.subtotal)
+  const otherCharges = Number(input.otherCharges ?? 0)
   const taxAmount = Number(input.taxAmount)
   const totalAmount = Number(input.totalAmount)
   const lineItems = (input.lineItems ?? []).map((line) => ({
@@ -412,11 +447,12 @@ function validateFields(input: NormalizedDocumentFields): NormalizedDocumentFiel
   const warnings: string[] = []
   if (!/^\d{4}-\d{2}-\d{2}$/.test(input.documentDate)) warnings.push("Document date is required.")
   if (!Number.isFinite(totalAmount) || totalAmount <= 0) warnings.push("Total amount must be greater than zero.")
+  if (!Number.isFinite(otherCharges)) warnings.push("Other charges must be a valid amount.")
   if (lineItems.some((line) => !line.description)) warnings.push("Every line needs a description.")
   if (lineItems.some((line) => !Number.isFinite(line.quantity) || line.quantity <= 0)) warnings.push("Line quantity must be greater than zero.")
   if (lineItems.some((line) => !Number.isFinite(line.unitPrice) || line.unitPrice < 0)) warnings.push("Line unit price must be zero or greater.")
   if (lineItems.some((line) => !Number.isFinite(line.taxRate) || line.taxRate < 0)) warnings.push("Tax rate must be zero or greater.")
-  if (Math.abs(Number((subtotal + taxAmount - totalAmount).toFixed(2))) > 0.02) warnings.push("Subtotal plus tax does not match total.")
+  if (Math.abs(Number((subtotal + otherCharges + taxAmount - totalAmount).toFixed(2))) > 0.02) warnings.push("Subtotal plus charges plus tax does not match total.")
 
   return {
     documentDate: input.documentDate,
@@ -427,6 +463,7 @@ function validateFields(input: NormalizedDocumentFields): NormalizedDocumentFiel
     clientName: input.clientName ?? "",
     taxId: input.taxId ?? "",
     subtotal,
+    otherCharges,
     taxAmount,
     totalAmount,
     paymentMethod: input.paymentMethod ?? "",
@@ -514,29 +551,20 @@ export async function postConfirmedDocument(id: string) {
   const detail = await getDocumentDetail(id)
   if (!detail.draft || detail.draft.status !== "confirmed") throw new Error("Confirm the document before posting.")
   const fields = detail.draft.normalizedFields
-  if (detail.draft.draftType === "tax_document" || detail.draft.draftType === "bank_document" || detail.draft.draftType === "unknown") {
-    throw new Error("This category requires manual accounting outside the OCR shortcut.")
-  }
+  const lines = validateJournalLines(detail.draft.suggestedJournalLines, fields.documentDate)
+  if (lines.length === 0) throw new Error("Add balanced journal lines before posting.")
 
   await query("UPDATE documents SET processing_status = 'posting', updated_at = NOW() WHERE id = $1 AND company_id = $2", [id, DEFAULT_COMPANY_ID])
   try {
-    const journalEntry = await postExpenseDocumentByRule({
-      documentId: id,
+    const journalEntry: JournalEntry = {
+      id: `je-${randomUUID()}`,
       date: fields.documentDate,
-      amount: fields.subtotal,
-      taxRate: fields.subtotal > 0 ? Number(((fields.taxAmount / fields.subtotal) * 100).toFixed(4)) : 0,
-      paidImmediately: !!fields.paymentMethod,
-      vendorName: fields.vendorName,
       reference: fields.documentNumber,
       description: `OCR ${detail.draft.draftType}${fields.vendorName ? ` - ${fields.vendorName}` : ""}`,
-      override: detail.draft.suggestedJournalLines.length > 0
-        ? {
-            lines: detail.draft.suggestedJournalLines,
-            reason: "Posted from confirmed OCR draft.",
-          }
-        : undefined,
-    })
+      lines,
+    }
     await transaction(async (client) => {
+      await insertJournalEntry(client, journalEntry)
       await exec(client, "UPDATE document_accounting_drafts SET status = 'posted', journal_entry_id = $1, updated_at = NOW() WHERE id = $2 AND company_id = $3", [
         journalEntry.id,
         detail.draft?.id,

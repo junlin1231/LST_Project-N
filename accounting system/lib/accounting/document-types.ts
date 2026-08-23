@@ -58,6 +58,7 @@ export interface NormalizedDocumentFields {
   clientName?: string
   taxId?: string
   subtotal: number
+  otherCharges?: number
   taxAmount: number
   totalAmount: number
   paymentMethod?: string

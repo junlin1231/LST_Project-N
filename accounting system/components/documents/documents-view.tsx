@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useMemo, useRef, useState } from "react"
-import { Camera, Check, FileUp, LoaderCircle, RefreshCw, Save, Send, X } from "lucide-react"
+import { Camera, Check, FileUp, LoaderCircle, RefreshCw, Save, Send, Trash2, X } from "lucide-react"
 import { Amount } from "@/components/amount"
 import { PageHeader } from "@/components/page-header"
 import { Badge } from "@/components/ui/badge"
@@ -15,6 +15,9 @@ import type { JournalLine } from "@/lib/accounting/types"
 import { cn } from "@/lib/utils"
 
 type Notice = { type: "error" | "success"; message: string } | null
+type PostingTemplate = "expense_paid" | "vendor_bill" | "money_received" | "manual"
+
+const DEFAULT_TAX_RATE = 0.06
 
 const emptyFields: NormalizedDocumentFields = {
   documentDate: new Date().toISOString().slice(0, 10),
@@ -25,6 +28,7 @@ const emptyFields: NormalizedDocumentFields = {
   clientName: "",
   taxId: "",
   subtotal: 0,
+  otherCharges: 0,
   taxAmount: 0,
   totalAmount: 0,
   paymentMethod: "",
@@ -55,7 +59,18 @@ function toNumber(value: string) {
   return Number.isFinite(number) ? number : 0
 }
 
+function accountIdByCode(accounts: { id: string; code: string; type: string }[], code: string, fallbackType: string) {
+  return accounts.find((account) => account.code === code)?.id ?? accounts.find((account) => account.type === fallbackType)?.id ?? accounts[0]?.id ?? ""
+}
+
+function splitTotalIncludingTax(total: number, taxRate = DEFAULT_TAX_RATE) {
+  if (!Number.isFinite(total) || total <= 0 || taxRate <= 0) return { subtotal: Math.max(0, total), taxAmount: 0 }
+  const subtotal = Number((total / (1 + taxRate)).toFixed(2))
+  return { subtotal, taxAmount: Number((total - subtotal).toFixed(2)) }
+}
+
 function recalculateFields(fields: NormalizedDocumentFields): NormalizedDocumentFields {
+  const otherCharges = Number(fields.otherCharges) || 0
   const lineItems = fields.lineItems.map((line) => {
     const quantity = Number(line.quantity) || 0
     const unitPrice = Number(line.unitPrice) || 0
@@ -73,7 +88,7 @@ function recalculateFields(fields: NormalizedDocumentFields): NormalizedDocument
   })
   const subtotal = Number(lineItems.reduce((sum, line) => sum + line.quantity * line.unitPrice, 0).toFixed(2))
   const taxAmount = Number(lineItems.reduce((sum, line) => sum + line.taxAmount, 0).toFixed(2))
-  return { ...fields, lineItems, subtotal, taxAmount, totalAmount: Number((subtotal + taxAmount).toFixed(2)), warnings: [] }
+  return { ...fields, lineItems, subtotal, otherCharges, taxAmount, totalAmount: Number((subtotal + otherCharges + taxAmount).toFixed(2)), warnings: [] }
 }
 
 export function DocumentsView() {
@@ -83,10 +98,14 @@ export function DocumentsView() {
   const [category, setCategory] = useState<DocumentCategory>("unknown")
   const [fields, setFields] = useState<NormalizedDocumentFields>(emptyFields)
   const [lines, setLines] = useState<JournalLine[]>([])
+  const [postingTemplate, setPostingTemplate] = useState<PostingTemplate>("expense_paid")
   const [busy, setBusy] = useState(false)
   const [activeAction, setActiveAction] = useState<string | null>(null)
+  const [processingDocumentId, setProcessingDocumentId] = useState<string | null>(null)
+  const [processingFilename, setProcessingFilename] = useState("")
   const [scanProgress, setScanProgress] = useState(0)
   const [notice, setNotice] = useState<Notice>(null)
+  const selectedIdRef = useRef<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const cameraInputRef = useRef<HTMLInputElement>(null)
 
@@ -94,14 +113,23 @@ export function DocumentsView() {
   const canEdit = !!selected?.draft && selected.processingStatus !== "posted" && selected.processingStatus !== "rejected"
   const canConfirm = selected?.draft?.status === "draft" || selected?.draft?.status === "rejected"
   const canPost = selected?.draft?.status === "confirmed" && selected.processingStatus !== "posted"
+  const canDelete = !!selected && selected.processingStatus !== "posted" && selected.reviewStatus !== "posted"
   const warnings = fields.warnings ?? []
-  const isScanning = activeAction === "process"
+  const isScanning = activeAction === "process" && !!processingDocumentId
+  const isSelectedScanning = isScanning && selected?.id === processingDocumentId
+  const totalDebit = Number(lines.reduce((sum, line) => sum + Number(line.debit), 0).toFixed(2))
+  const totalCredit = Number(lines.reduce((sum, line) => sum + Number(line.credit), 0).toFixed(2))
+  const journalDifference = Number(Math.abs(totalDebit - totalCredit).toFixed(2))
 
-  async function loadDocuments() {
+  useEffect(() => {
+    selectedIdRef.current = selectedId ?? null
+  }, [selectedId])
+
+  async function loadDocuments(nextSelectedId: string | null | undefined = selectedId) {
     const next = await readJson<OcrDocument[]>(await fetch("/api/documents", { cache: "no-store" }))
     setDocuments(next)
-    if (selectedId) {
-      const refreshed = await readJson<OcrDocumentDetail>(await fetch(`/api/documents/${selectedId}`, { cache: "no-store" }))
+    if (nextSelectedId) {
+      const refreshed = await readJson<OcrDocumentDetail>(await fetch(`/api/documents/${nextSelectedId}`, { cache: "no-store" }))
       setSelected(refreshed)
     }
   }
@@ -120,6 +148,7 @@ export function DocumentsView() {
     setCategory(selected.draft.draftType)
     setFields(selected.draft.normalizedFields)
     setLines(selected.draft.suggestedJournalLines)
+    setPostingTemplate(templateForCategory(selected.draft.draftType))
   }, [selected])
 
   useEffect(() => {
@@ -138,6 +167,7 @@ export function DocumentsView() {
   async function selectDocument(id: string) {
     setBusy(true)
     setNotice(null)
+    selectedIdRef.current = id
     try {
       setSelected(await readJson<OcrDocumentDetail>(await fetch(`/api/documents/${id}`, { cache: "no-store" })))
     } catch (error) {
@@ -156,8 +186,9 @@ export function DocumentsView() {
       formData.set("file", file)
       formData.set("sourceChannel", sourceChannel)
       const created = await readJson<OcrDocumentDetail>(await fetch("/api/documents", { method: "POST", body: formData }))
+      selectedIdRef.current = created.id
       setSelected(created)
-      await loadDocuments()
+      await loadDocuments(created.id)
       setNotice({ type: "success", message: "Document stored. Run OCR to capture data." })
     } catch (error) {
       setNotice({ type: "error", message: error instanceof Error ? error.message : "Upload failed." })
@@ -171,17 +202,31 @@ export function DocumentsView() {
   async function action(path: string, options?: RequestInit) {
     if (!selected) return
     const isOcrProcess = path === "process"
+    const targetId = selected.id
+    const targetFilename = selected.originalFilename
+    if (isOcrProcess && selected.extraction) {
+      const confirmed = window.confirm(`Re-scan ${selected.originalFilename}? This will create a fresh OCR draft from the same stored file.`)
+      if (!confirmed) return
+    }
     setBusy(true)
     setActiveAction(path)
-    if (isOcrProcess) setScanProgress(6)
+    if (isOcrProcess) {
+      setProcessingDocumentId(targetId)
+      setProcessingFilename(targetFilename)
+      setScanProgress(6)
+    }
     setNotice(null)
     try {
-      const response = await fetch(`/api/documents/${selected.id}/${path}`, options ?? { method: "POST" })
+      const response = await fetch(`/api/documents/${targetId}/${path}`, options ?? { method: "POST" })
       const body = await readJson<{ detail?: OcrDocumentDetail; journalEntry?: { id: string } } | OcrDocumentDetail>(response)
       const detail = "detail" in body && body.detail ? body.detail : body as OcrDocumentDetail
       if (isOcrProcess) setScanProgress(100)
-      setSelected(detail)
-      await loadDocuments()
+      if (selectedIdRef.current === targetId) {
+        setSelected(detail)
+        await loadDocuments(detail.id)
+      } else {
+        await loadDocuments(selectedIdRef.current)
+      }
       setNotice({ type: "success", message: path === "post" ? `Posted journal entry ${"journalEntry" in body ? body.journalEntry?.id ?? "" : ""}`.trim() : "Document updated." })
     } catch (error) {
       setNotice({ type: "error", message: error instanceof Error ? error.message : "Action failed." })
@@ -190,6 +235,8 @@ export function DocumentsView() {
       if (isOcrProcess) {
         window.setTimeout(() => {
           setActiveAction((current) => (current === path ? null : current))
+          setProcessingDocumentId(null)
+          setProcessingFilename("")
           setScanProgress(0)
         }, 700)
       } else {
@@ -208,6 +255,30 @@ export function DocumentsView() {
     })
   }
 
+  async function deleteSelectedDocument() {
+    if (!selected) return
+    const confirmed = window.confirm(`Delete ${selected.originalFilename} and its OCR draft?`)
+    if (!confirmed) return
+
+    setBusy(true)
+    setActiveAction("delete")
+    setNotice(null)
+    try {
+      await readJson<{ id: string; deleted: true }>(await fetch(`/api/documents/${selected.id}`, { method: "DELETE" }))
+      selectedIdRef.current = null
+      setSelected(null)
+      setFields(emptyFields)
+      setLines([])
+      await loadDocuments(null)
+      setNotice({ type: "success", message: "Document deleted." })
+    } catch (error) {
+      setNotice({ type: "error", message: error instanceof Error ? error.message : "Delete failed." })
+    } finally {
+      setBusy(false)
+      setActiveAction(null)
+    }
+  }
+
   function updateLine(index: number, changes: Partial<JournalLine>) {
     setLines((current) => current.map((line, lineIndex) => (lineIndex === index ? { ...line, ...changes } : line)))
   }
@@ -217,6 +288,111 @@ export function DocumentsView() {
       ...current,
       lineItems: current.lineItems.map((line, lineIndex) => (lineIndex === index ? { ...line, ...changes } : line)),
     }))
+  }
+
+  function updateOtherCharges(value: number) {
+    const nextFields = recalculateFields({ ...fields, otherCharges: value })
+    setFields(nextFields)
+    setLines(buildPostingLines(postingTemplate, nextFields))
+  }
+
+  function templateForCategory(nextCategory: DocumentCategory): PostingTemplate {
+    if (nextCategory === "receipt_income" || nextCategory === "sales_invoice") return "money_received"
+    if (nextCategory === "vendor_bill") return "vendor_bill"
+    if (nextCategory === "bank_document" || nextCategory === "unknown") return "manual"
+    return "expense_paid"
+  }
+
+  function buildPostingLines(template: PostingTemplate, nextFields: NormalizedDocumentFields) {
+    const total = Number(nextFields.totalAmount || nextFields.subtotal || 0)
+    const tax = Number(nextFields.taxAmount || 0)
+    const beforeTax = Number(Math.max(0, total - tax).toFixed(2))
+    const cashAccountId = accountIdByCode(accounts, "1010", "asset")
+    const revenueAccountId = accountIdByCode(accounts, "4000", "revenue")
+    const taxPayableAccountId = accountIdByCode(accounts, "2100", "liability")
+    const expenseAccountId = accountIdByCode(accounts, "5300", "expense")
+    const payableAccountId = accountIdByCode(accounts, "2000", "liability")
+
+    if (template === "money_received") {
+      return [
+        { accountId: cashAccountId, debit: total, credit: 0 },
+        { accountId: revenueAccountId, debit: 0, credit: beforeTax },
+        { accountId: taxPayableAccountId, debit: 0, credit: tax },
+      ].filter((line) => line.debit > 0 || line.credit > 0)
+    }
+    if (template === "vendor_bill") {
+      return [
+        { accountId: expenseAccountId, debit: beforeTax, credit: 0 },
+        { accountId: taxPayableAccountId, debit: tax, credit: 0 },
+        { accountId: payableAccountId, debit: 0, credit: total },
+      ].filter((line) => line.debit > 0 || line.credit > 0)
+    }
+    if (template === "manual") return []
+    return [
+      { accountId: expenseAccountId, debit: beforeTax, credit: 0 },
+      { accountId: taxPayableAccountId, debit: tax, credit: 0 },
+      { accountId: cashAccountId, debit: 0, credit: total },
+    ].filter((line) => line.debit > 0 || line.credit > 0)
+  }
+
+  function simplifyToTotalOnly() {
+    const total = Number(fields.totalAmount || fields.subtotal || fields.lineItems.reduce((sum, line) => sum + Number(line.lineTotal), 0) || 0)
+    const description = fields.vendorName ? `${fields.vendorName} receipt` : titleCase(category)
+    const taxSplit = splitTotalIncludingTax(total)
+    const nextFields = recalculateFields({
+      ...fields,
+      subtotal: taxSplit.subtotal,
+      otherCharges: 0,
+      taxAmount: taxSplit.taxAmount,
+      totalAmount: total,
+      lineItems: [{ description, quantity: 1, unitPrice: taxSplit.subtotal, taxRate: DEFAULT_TAX_RATE, taxAmount: taxSplit.taxAmount, lineTotal: total }],
+    })
+    setFields(nextFields)
+    setLines(buildPostingLines(postingTemplate, nextFields))
+  }
+
+  function applyDefaultTaxFromTotal() {
+    const total = Number(fields.totalAmount || fields.subtotal || fields.lineItems.reduce((sum, line) => sum + Number(line.lineTotal), 0) || 0)
+    const taxSplit = splitTotalIncludingTax(total)
+    const description = fields.lineItems[0]?.description || (fields.vendorName ? `${fields.vendorName} receipt` : titleCase(category))
+    const nextFields = recalculateFields({
+      ...fields,
+      subtotal: taxSplit.subtotal,
+      otherCharges: 0,
+      taxAmount: taxSplit.taxAmount,
+      totalAmount: total,
+      lineItems: [{ description, quantity: 1, unitPrice: taxSplit.subtotal, taxRate: DEFAULT_TAX_RATE, taxAmount: taxSplit.taxAmount, lineTotal: total }],
+    })
+    setFields(nextFields)
+    setLines(buildPostingLines(postingTemplate, nextFields))
+  }
+
+  function applyPostingTemplate(template: PostingTemplate) {
+    setPostingTemplate(template)
+    if (template === "money_received") {
+      setCategory("receipt_income")
+      setLines(buildPostingLines(template, fields))
+      return
+    }
+    if (template === "vendor_bill") {
+      setCategory("vendor_bill")
+      setLines(buildPostingLines(template, fields))
+      return
+    }
+    if (template === "manual") {
+      setCategory("bank_document")
+      setLines(buildPostingLines(template, fields))
+      return
+    }
+    setCategory("receipt_expense")
+    setLines(buildPostingLines(template, fields))
+  }
+
+  function changeCategory(nextCategory: DocumentCategory) {
+    const nextTemplate = templateForCategory(nextCategory)
+    setCategory(nextCategory)
+    setPostingTemplate(nextTemplate)
+    setLines(buildPostingLines(nextTemplate, fields))
   }
 
   const documentCards = useMemo(() => documents.map((document) => (
@@ -291,8 +467,8 @@ export function DocumentsView() {
                   </div>
                   <div className="flex flex-wrap gap-2">
                     <Button variant="outline" onClick={() => void action("process")} disabled={busy}>
-                      {isScanning ? <LoaderCircle className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
-                      {isScanning ? "Scanning" : "OCR"}
+                      {isSelectedScanning ? <LoaderCircle className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
+                      {isSelectedScanning ? "Scanning" : isScanning ? "Scan running" : selected.extraction ? "Re-scan" : "OCR"}
                     </Button>
                     <Button variant="outline" onClick={saveDraft} disabled={busy || !canEdit}>
                       <Save className="size-4" />
@@ -310,10 +486,14 @@ export function DocumentsView() {
                       <X className="size-4" />
                       Reject
                     </Button>
+                    <Button variant="outline" onClick={() => void deleteSelectedDocument()} disabled={busy || !canDelete}>
+                      {activeAction === "delete" ? <LoaderCircle className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
+                      Delete
+                    </Button>
                   </div>
                 </div>
 
-                {isScanning ? <ScanProgress progress={scanProgress} filename={selected.originalFilename} /> : null}
+                {isScanning ? <ScanProgress progress={scanProgress} filename={processingFilename} /> : null}
 
                 <Tabs defaultValue="fields" className="flex-1 p-4">
                   <TabsList className="grid h-auto w-full grid-cols-4">
@@ -355,10 +535,12 @@ export function DocumentsView() {
                       <Field label="Vendor"><Input value={fields.vendorName ?? ""} onChange={(event) => setFields((current) => ({ ...current, vendorName: event.target.value }))} /></Field>
                       <Field label="Currency"><Input value={fields.currency} onChange={(event) => setFields((current) => ({ ...current, currency: event.target.value.toUpperCase() }))} /></Field>
                       <Field label="Payment Method"><Input value={fields.paymentMethod ?? ""} onChange={(event) => setFields((current) => ({ ...current, paymentMethod: event.target.value }))} /></Field>
+                      <Field label="Other Charges"><Input inputMode="decimal" value={fields.otherCharges ?? 0} className="text-right" onChange={(event) => updateOtherCharges(toNumber(event.target.value))} /></Field>
                     </div>
 
-                    <div className="grid gap-3 sm:grid-cols-3">
+                    <div className="grid gap-3 sm:grid-cols-4">
                       <Summary label="Subtotal" value={fields.subtotal} />
+                      <Summary label="Charges" value={fields.otherCharges ?? 0} />
                       <Summary label="Tax" value={fields.taxAmount} />
                       <Summary label="Total" value={fields.totalAmount} />
                     </div>
@@ -366,7 +548,11 @@ export function DocumentsView() {
                     <div className="space-y-2">
                       <div className="flex items-center justify-between">
                         <h3 className="text-sm font-semibold">Line Items</h3>
-                        <Button variant="outline" size="sm" onClick={() => setFields((current) => ({ ...current, lineItems: [...current.lineItems, { description: "", quantity: 1, unitPrice: 0, taxRate: 0, taxAmount: 0, lineTotal: 0 }] }))}>Add Line</Button>
+                        <div className="flex flex-wrap justify-end gap-2">
+                          <Button variant="outline" size="sm" onClick={applyDefaultTaxFromTotal}>Default Tax</Button>
+                          <Button variant="outline" size="sm" onClick={simplifyToTotalOnly}>Total Only</Button>
+                          <Button variant="outline" size="sm" onClick={() => setFields((current) => ({ ...current, lineItems: [...current.lineItems, { description: "", quantity: 1, unitPrice: 0, taxRate: 0, taxAmount: 0, lineTotal: 0 }] }))}>Add Line</Button>
+                        </div>
                       </div>
                       <div className="space-y-2">
                         {fields.lineItems.map((line, index) => (
@@ -384,11 +570,25 @@ export function DocumentsView() {
                   </TabsContent>
 
                   <TabsContent value="category" className="mt-4 space-y-4">
-                    <Field label="Category">
-                      <select className="h-10 rounded-md border border-input bg-background px-3 text-sm" value={category} onChange={(event) => setCategory(event.target.value as DocumentCategory)}>
+                    <Field label="Document Type">
+                      <select className="h-10 rounded-md border border-input bg-background px-3 text-sm" value={category} onChange={(event) => changeCategory(event.target.value as DocumentCategory)}>
                         {DOCUMENT_CATEGORIES.map((option) => <option key={option} value={option}>{titleCase(option)}</option>)}
                       </select>
                     </Field>
+                    <Field label="Posting Option">
+                      <select className="h-10 rounded-md border border-input bg-background px-3 text-sm" value={postingTemplate} onChange={(event) => applyPostingTemplate(event.target.value as PostingTemplate)}>
+                        <option value="expense_paid">Paid expense / receipt</option>
+                        <option value="vendor_bill">Vendor bill / payable</option>
+                        <option value="money_received">Money received / bank credit</option>
+                        <option value="manual">Manual journal / other bank statement</option>
+                      </select>
+                    </Field>
+                    <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                      <Button variant="outline" onClick={() => applyPostingTemplate("expense_paid")}>Paid Expense</Button>
+                      <Button variant="outline" onClick={() => applyPostingTemplate("vendor_bill")}>Vendor Bill</Button>
+                      <Button variant="outline" onClick={() => applyPostingTemplate("money_received")}>Money Received</Button>
+                      <Button variant="outline" onClick={() => applyPostingTemplate("manual")}>Manual</Button>
+                    </div>
                     <div className="rounded-md border border-border p-3 text-sm text-muted-foreground">
                       {selected.categoryResult?.reason ?? "Run OCR to get a category suggestion."}
                     </div>
@@ -399,20 +599,36 @@ export function DocumentsView() {
                       <h3 className="text-sm font-semibold">Suggested Journal Entry</h3>
                       <Button variant="outline" size="sm" onClick={() => setLines((current) => [...current, { accountId: accounts[0]?.id ?? "", debit: 0, credit: 0 }])}>Add Line</Button>
                     </div>
-                    {lines.map((line, index) => (
-                      <div key={index} className="grid gap-2 rounded-md border border-border p-3 md:grid-cols-[minmax(12rem,1fr)_8rem_8rem_auto]">
-                        <select className="h-10 min-w-0 rounded-md border border-input bg-background px-3 text-sm" value={line.accountId} onChange={(event) => updateLine(index, { accountId: event.target.value })}>
-                          {accounts.map((account) => <option key={account.id} value={account.id}>{account.code} - {account.name}</option>)}
-                        </select>
-                        <Input inputMode="decimal" className="text-right" value={line.debit} onChange={(event) => updateLine(index, { debit: toNumber(event.target.value) })} />
-                        <Input inputMode="decimal" className="text-right" value={line.credit} onChange={(event) => updateLine(index, { credit: toNumber(event.target.value) })} />
-                        <Button variant="ghost" size="icon" aria-label="Remove journal line" onClick={() => setLines((current) => current.filter((_, lineIndex) => lineIndex !== index))}><X className="size-4" /></Button>
+                    <div className="overflow-hidden rounded-md border border-border">
+                      <div className="hidden grid-cols-[minmax(12rem,1fr)_8rem_8rem_3rem] gap-2 border-b border-border bg-muted/40 px-3 py-2 text-xs font-medium text-muted-foreground md:grid">
+                        <span>Account</span>
+                        <span className="text-right">Debit</span>
+                        <span className="text-right">Credit</span>
+                        <span />
                       </div>
-                    ))}
+                      {lines.length === 0 ? (
+                        <div className="p-4 text-sm text-muted-foreground">Choose a posting option or add journal lines manually.</div>
+                      ) : lines.map((line, index) => (
+                        <div key={index} className="grid gap-3 border-b border-border p-3 last:border-b-0 md:grid-cols-[minmax(12rem,1fr)_8rem_8rem_3rem] md:items-end md:gap-2">
+                          <JournalField label="Account">
+                            <select className="h-10 min-w-0 rounded-md border border-input bg-background px-3 text-sm" value={line.accountId} onChange={(event) => updateLine(index, { accountId: event.target.value })}>
+                              {accounts.map((account) => <option key={account.id} value={account.id}>{account.code} - {account.name}</option>)}
+                            </select>
+                          </JournalField>
+                          <JournalField label="Debit">
+                            <Input inputMode="decimal" className="text-right font-mono text-debit" value={line.debit} onChange={(event) => updateLine(index, { debit: toNumber(event.target.value), credit: toNumber(event.target.value) > 0 ? 0 : line.credit })} />
+                          </JournalField>
+                          <JournalField label="Credit">
+                            <Input inputMode="decimal" className="text-right font-mono text-credit" value={line.credit} onChange={(event) => updateLine(index, { credit: toNumber(event.target.value), debit: toNumber(event.target.value) > 0 ? 0 : line.debit })} />
+                          </JournalField>
+                          <Button variant="ghost" size="icon" aria-label="Remove journal line" onClick={() => setLines((current) => current.filter((_, lineIndex) => lineIndex !== index))}><X className="size-4" /></Button>
+                        </div>
+                      ))}
+                    </div>
                     <div className="grid gap-3 sm:grid-cols-3">
-                      <Summary label="Debit" value={lines.reduce((sum, line) => sum + Number(line.debit), 0)} />
-                      <Summary label="Credit" value={lines.reduce((sum, line) => sum + Number(line.credit), 0)} />
-                      <Summary label="Difference" value={Math.abs(lines.reduce((sum, line) => sum + Number(line.debit) - Number(line.credit), 0))} />
+                      <Summary label="Total Debit" value={totalDebit} />
+                      <Summary label="Total Credit" value={totalCredit} />
+                      <Summary label={journalDifference === 0 ? "Balanced" : "Difference"} value={journalDifference} />
                     </div>
                     <p className="text-xs text-muted-foreground">Account names use current chart of accounts. Example: {lines[0] ? accountName(lines[0].accountId) : "No account selected"}.</p>
                   </TabsContent>
@@ -430,6 +646,15 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   return (
     <div className="grid gap-2">
       <Label>{label}</Label>
+      {children}
+    </div>
+  )
+}
+
+function JournalField({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="grid gap-2">
+      <Label className="md:sr-only">{label}</Label>
       {children}
     </div>
   )
