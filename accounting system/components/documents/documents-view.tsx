@@ -63,6 +63,11 @@ function accountIdByCode(accounts: { id: string; code: string; type: string }[],
   return accounts.find((account) => account.code === code)?.id ?? accounts.find((account) => account.type === fallbackType)?.id ?? accounts[0]?.id ?? ""
 }
 
+function firstTextMatch(text: string, groups: Array<{ code: string; keywords: string[] }>) {
+  const lower = text.toLowerCase()
+  return groups.find((group) => group.keywords.some((keyword) => lower.includes(keyword)))?.code
+}
+
 function splitTotalIncludingTax(total: number, taxRate = DEFAULT_TAX_RATE) {
   if (!Number.isFinite(total) || total <= 0 || taxRate <= 0) return { subtotal: Math.max(0, total), taxAmount: 0 }
   const subtotal = Number((total / (1 + taxRate)).toFixed(2))
@@ -303,14 +308,46 @@ export function DocumentsView() {
     return "expense_paid"
   }
 
-  function buildPostingLines(template: PostingTemplate, nextFields: NormalizedDocumentFields) {
+  function expenseAccountIdFor(nextCategory: DocumentCategory, nextFields: NormalizedDocumentFields) {
+    const categoryAccountCode: Partial<Record<DocumentCategory, string>> = {
+      entertainment: "5800",
+      travel: "5900",
+      office_supplies: "5300",
+      utilities: "5200",
+      rent: "5000",
+      salary: "5100",
+      petrol: "5950",
+      inventory_purchase: "5600",
+      delivery_document: "5950",
+    }
+    const text = [
+      nextCategory,
+      nextFields.vendorName,
+      nextFields.documentNumber,
+      nextFields.paymentMethod,
+      ...nextFields.lineItems.map((line) => line.description),
+    ].filter(Boolean).join("\n")
+    const matchedCode = categoryAccountCode[nextCategory] ?? firstTextMatch(text, [
+      { code: "5200", keywords: ["electric", "electricity", "utility", "utilities", "water bill", "air selangor", "tnb", "telekom", "internet", "wifi"] },
+      { code: "5950", keywords: ["petrol", "fuel", "diesel", "parking", "toll", "grab", "taxi", "transport", "delivery", "courier", "logistic"] },
+      { code: "5800", keywords: ["restaurant", "dining", "dinner", "lunch", "meal", "cafe", "coffee", "food", "entertainment"] },
+      { code: "5500", keywords: ["software", "subscription", "saas", "cloud", "hosting", "domain"] },
+      { code: "5400", keywords: ["marketing", "advertising", "facebook ads", "google ads", "promotion"] },
+      { code: "5000", keywords: ["rent", "rental", "lease"] },
+      { code: "5100", keywords: ["salary", "wage", "payroll"] },
+      { code: "5300", keywords: ["stationery", "office supply", "office supplies", "printer", "paper", "ink"] },
+    ]) ?? "5300"
+    return accountIdByCode(accounts, matchedCode, "expense")
+  }
+
+  function buildPostingLines(template: PostingTemplate, nextFields: NormalizedDocumentFields, nextCategory = category) {
     const total = Number(nextFields.totalAmount || nextFields.subtotal || 0)
     const tax = Number(nextFields.taxAmount || 0)
     const beforeTax = Number(Math.max(0, total - tax).toFixed(2))
     const cashAccountId = accountIdByCode(accounts, "1010", "asset")
     const revenueAccountId = accountIdByCode(accounts, "4000", "revenue")
     const taxPayableAccountId = accountIdByCode(accounts, "2100", "liability")
-    const expenseAccountId = accountIdByCode(accounts, "5300", "expense")
+    const expenseAccountId = expenseAccountIdFor(nextCategory, nextFields)
     const payableAccountId = accountIdByCode(accounts, "2000", "liability")
 
     if (template === "money_received") {
@@ -371,28 +408,28 @@ export function DocumentsView() {
     setPostingTemplate(template)
     if (template === "money_received") {
       setCategory("receipt_income")
-      setLines(buildPostingLines(template, fields))
+      setLines(buildPostingLines(template, fields, "receipt_income"))
       return
     }
     if (template === "vendor_bill") {
       setCategory("vendor_bill")
-      setLines(buildPostingLines(template, fields))
+      setLines(buildPostingLines(template, fields, "vendor_bill"))
       return
     }
     if (template === "manual") {
       setCategory("bank_document")
-      setLines(buildPostingLines(template, fields))
+      setLines(buildPostingLines(template, fields, "bank_document"))
       return
     }
     setCategory("receipt_expense")
-    setLines(buildPostingLines(template, fields))
+    setLines(buildPostingLines(template, fields, "receipt_expense"))
   }
 
   function changeCategory(nextCategory: DocumentCategory) {
     const nextTemplate = templateForCategory(nextCategory)
     setCategory(nextCategory)
     setPostingTemplate(nextTemplate)
-    setLines(buildPostingLines(nextTemplate, fields))
+    setLines(buildPostingLines(nextTemplate, fields, nextCategory))
   }
 
   const documentCards = useMemo(() => documents.map((document) => (

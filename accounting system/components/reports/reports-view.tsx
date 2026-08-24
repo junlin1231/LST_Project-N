@@ -28,10 +28,11 @@ import {
   calculateMonthlyDepreciation,
   DEFAULT_RETAINED_EARNINGS_ACCOUNT_ID,
 } from "@/lib/accounting/reports"
-import type { DepreciationSchedule, FixedAsset, ReportSection } from "@/lib/accounting/types"
+import { ACCOUNT_TYPE_LABEL, type Account, type DepreciationSchedule, type FixedAsset, type ReportSection } from "@/lib/accounting/types"
 
 const today = new Date().toISOString().slice(0, 10)
 const yearStart = `${today.slice(0, 4)}-01-01`
+const trialBalanceTypeOrder: Account["type"][] = ["asset", "liability", "equity", "revenue", "expense"]
 
 function SectionTable({ section }: { section: ReportSection }) {
   return (
@@ -136,6 +137,18 @@ export function ReportsView() {
   const [retainedEarningsAccountId, setRetainedEarningsAccountId] = useState(DEFAULT_RETAINED_EARNINGS_ACCOUNT_ID)
 
   const trialBalance = useMemo(() => buildTrialBalance(accounts, journalEntries.filter((entry) => entry.date <= periodEnd)), [accounts, journalEntries, periodEnd])
+  const trialBalanceSections = useMemo(() => trialBalanceTypeOrder
+    .map((type) => {
+      const rows = trialBalance.filter((row) => row.type === type)
+      return {
+        type,
+        label: ACCOUNT_TYPE_LABEL[type],
+        rows,
+        debit: Number(rows.reduce((sum, row) => sum + row.debit, 0).toFixed(2)),
+        credit: Number(rows.reduce((sum, row) => sum + row.credit, 0).toFixed(2)),
+      }
+    })
+    .filter((section) => section.rows.length > 0), [trialBalance])
   const generalLedger = useMemo(() => {
     const ledger = buildGeneralLedger(accounts, journalEntries).filter((line) => line.date >= periodStart && line.date <= periodEnd)
     return accountFilter === "all" ? ledger : ledger.filter((line) => line.accountId === accountFilter)
@@ -200,7 +213,10 @@ export function ReportsView() {
 
   function exportTrialBalance() {
     downloadCsv(fileName("trial-balance"), [
-      ...trialBalance.map((row) => ({ AccountCode: row.code, AccountName: row.name, Type: row.type, Debit: row.debit, Credit: row.credit })),
+      ...trialBalanceSections.flatMap((section) => [
+        { AccountCode: "", AccountName: `${section.label} Total`, Type: section.type, Debit: section.debit, Credit: section.credit },
+        ...section.rows.map((row) => ({ AccountCode: row.code, AccountName: row.name, Type: row.type, Debit: row.debit, Credit: row.credit })),
+      ]),
       { AccountCode: "", AccountName: "Total", Type: "", Debit: totalDebits, Credit: totalCredits },
     ])
   }
@@ -375,9 +391,22 @@ export function ReportsView() {
             <Table>
               <TableHeader><TableRow><TableHead>Account</TableHead><TableHead>Type</TableHead><TableHead className="text-right">Debit</TableHead><TableHead className="text-right">Credit</TableHead></TableRow></TableHeader>
               <TableBody>
-                {trialBalance.map((row) => (
-                  <TableRow key={row.accountId}><TableCell><span className="font-mono text-xs text-muted-foreground">{row.code}</span> {row.name}</TableCell><TableCell className="capitalize">{row.type}</TableCell><TableCell className="text-right"><Amount value={row.debit} /></TableCell><TableCell className="text-right"><Amount value={row.credit} /></TableCell></TableRow>
-                ))}
+                {trialBalanceSections.flatMap((section) => [
+                  <TableRow key={`${section.type}-section`} className="bg-muted/50">
+                    <TableCell className="font-semibold">{section.label}</TableCell>
+                    <TableCell className="capitalize">{section.type}</TableCell>
+                    <TableCell className="text-right font-semibold"><Amount value={section.debit} /></TableCell>
+                    <TableCell className="text-right font-semibold"><Amount value={section.credit} /></TableCell>
+                  </TableRow>,
+                  ...section.rows.map((row) => (
+                    <TableRow key={row.accountId}>
+                      <TableCell className="pl-6"><span className="font-mono text-xs text-muted-foreground">{row.code}</span> {row.name}</TableCell>
+                      <TableCell className="capitalize">{row.type}</TableCell>
+                      <TableCell className="text-right"><Amount value={row.debit} /></TableCell>
+                      <TableCell className="text-right"><Amount value={row.credit} /></TableCell>
+                    </TableRow>
+                  )),
+                ])}
                 <TableRow><TableCell className="font-semibold">Total</TableCell><TableCell /><TableCell className="text-right font-semibold"><Amount value={totalDebits} /></TableCell><TableCell className="text-right font-semibold"><Amount value={totalCredits} /></TableCell></TableRow>
               </TableBody>
             </Table>

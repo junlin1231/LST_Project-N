@@ -175,6 +175,46 @@ function refineBankTransferCategory(decision: CategoryDecision, rawText: string)
   return decision
 }
 
+function firstKeywordMatch(text: string, groups: Array<{ accountId: string; keywords: string[] }>) {
+  const lower = text.toLowerCase()
+  return groups.find((group) => group.keywords.some((keyword) => lower.includes(keyword)))?.accountId
+}
+
+function expenseAccountFor(category: DocumentCategory, fields: NormalizedDocumentFields, rawText: string, fallbackAccountId: string) {
+  const text = [
+    rawText,
+    fields.vendorName,
+    fields.documentNumber,
+    fields.paymentMethod,
+    ...fields.lineItems.map((line) => line.description),
+  ].filter(Boolean).join("\n")
+
+  const categoryAccount: Partial<Record<DocumentCategory, string>> = {
+    entertainment: "5800",
+    travel: "5900",
+    office_supplies: "5300",
+    utilities: "5200",
+    rent: "5000",
+    salary: "5100",
+    petrol: "5950",
+    inventory_purchase: "5600",
+    delivery_document: "5950",
+  }
+  const byCategory = categoryAccount[category]
+  if (byCategory) return byCategory
+
+  return firstKeywordMatch(text, [
+    { accountId: "5200", keywords: ["electric", "electricity", "utility", "utilities", "water bill", "air selangor", "tnb", "telekom", "internet", "wifi"] },
+    { accountId: "5800", keywords: ["restaurant", "dining", "dinner", "lunch", "meal", "cafe", "coffee", "food", "entertainment"] },
+    { accountId: "5950", keywords: ["petrol", "fuel", "diesel", "parking", "toll", "grab", "taxi", "transport", "delivery", "courier", "logistic"] },
+    { accountId: "5500", keywords: ["software", "subscription", "saas", "cloud", "hosting", "domain"] },
+    { accountId: "5400", keywords: ["marketing", "advertising", "facebook ads", "google ads", "promotion"] },
+    { accountId: "5000", keywords: ["rent", "rental", "lease"] },
+    { accountId: "5100", keywords: ["salary", "wage", "payroll"] },
+    { accountId: "5300", keywords: ["stationery", "office supply", "office supplies", "printer", "paper", "ink"] },
+  ]) ?? fallbackAccountId
+}
+
 async function categorizeWithGemmaEndpoint(input: {
   rawText: string
   extractedFields: Partial<NormalizedDocumentFields>
@@ -245,7 +285,7 @@ export class MockCategorizationAdapter implements CategorizationAdapter {
       return null
     }) ?? inferCategory(`${input.rawText}\n${fields.documentNumber ?? ""}\n${fields.lineItems.map((line) => line.description).join(" ")}`), input.rawText)
     const expenseDebit = Number(Math.max(0, fields.totalAmount - fields.taxAmount).toFixed(2))
-    const suggestedJournalLines: JournalLine[] = buildSuggestedJournalLines(inferred.category, fields, config, expenseDebit)
+    const suggestedJournalLines: JournalLine[] = buildSuggestedJournalLines(inferred.category, fields, config, expenseDebit, input.rawText)
 
     return {
       ...inferred,
@@ -260,7 +300,7 @@ export class MockCategorizationAdapter implements CategorizationAdapter {
 
 export const categorizationAdapter = new MockCategorizationAdapter()
 
-function buildSuggestedJournalLines(category: DocumentCategory, fields: NormalizedDocumentFields, config: Awaited<ReturnType<typeof getActiveRuleConfig>>, expenseDebit: number) {
+function buildSuggestedJournalLines(category: DocumentCategory, fields: NormalizedDocumentFields, config: Awaited<ReturnType<typeof getActiveRuleConfig>>, expenseDebit: number, rawText: string) {
   if (category === "receipt_income" || category === "sales_invoice") {
     return [
       { accountId: config.cashAccountId, debit: fields.totalAmount, credit: 0 },
@@ -274,8 +314,9 @@ function buildSuggestedJournalLines(category: DocumentCategory, fields: Normaliz
   }
 
   const payableAccountId = fields.paymentMethod ? config.cashAccountId : config.accountsPayableAccountId
+  const expenseAccountId = expenseAccountFor(category, fields, rawText, config.expenseAccountId)
   return [
-    { accountId: config.expenseAccountId, debit: expenseDebit, credit: 0 },
+    { accountId: expenseAccountId, debit: expenseDebit, credit: 0 },
     { accountId: config.taxPayableAccountId, debit: fields.taxAmount, credit: 0 },
     { accountId: payableAccountId, debit: 0, credit: fields.totalAmount },
   ].filter((line) => line.debit > 0 || line.credit > 0)

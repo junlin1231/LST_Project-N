@@ -52,6 +52,16 @@ async function seedDefaultRuleAccounts(db: DbExecutor) {
     { id: DEFAULT_ACCOUNTING_RULE_CONFIG.taxPayableAccountId, code: "2100", name: "Tax Payable", type: "liability" },
     { id: DEFAULT_ACCOUNTING_RULE_CONFIG.expenseAccountId, code: "5300", name: "General Expenses", type: "expense" },
     { id: DEFAULT_ACCOUNTING_RULE_CONFIG.accountsPayableAccountId, code: "2000", name: "Accounts Payable", type: "liability" },
+    { id: "5000", code: "5000", name: "Rent Expense", type: "expense" },
+    { id: "5100", code: "5100", name: "Salary Expense", type: "expense" },
+    { id: "5200", code: "5200", name: "Utilities Expense", type: "expense" },
+    { id: "5400", code: "5400", name: "Marketing Expense", type: "expense" },
+    { id: "5500", code: "5500", name: "Software Subscriptions", type: "expense" },
+    { id: "5600", code: "5600", name: "Cost of Goods Sold", type: "expense" },
+    { id: "5700", code: "5700", name: "Depreciation Expense", type: "expense" },
+    { id: "5800", code: "5800", name: "Meals and Entertainment", type: "expense" },
+    { id: "5900", code: "5900", name: "Travel Expense", type: "expense" },
+    { id: "5950", code: "5950", name: "Fuel and Transport Expense", type: "expense" },
   ]
 
   await exec(db, "INSERT INTO companies (id, name, base_currency) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING", [

@@ -36,6 +36,9 @@ export const demoAccounts: Account[] = [
   { id: "5500", code: "5500", name: "Software Subscriptions", type: "expense" },
   { id: "5600", code: "5600", name: "Cost of Goods Sold", type: "expense" },
   { id: "5700", code: "5700", name: "Depreciation Expense", type: "expense" },
+  { id: "5800", code: "5800", name: "Meals and Entertainment", type: "expense" },
+  { id: "5900", code: "5900", name: "Travel Expense", type: "expense" },
+  { id: "5950", code: "5950", name: "Fuel and Transport Expense", type: "expense" },
 ]
 
 export const demoFixedAssets: FixedAsset[] = [
