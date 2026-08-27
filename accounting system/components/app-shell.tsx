@@ -7,6 +7,7 @@ import {
   CircleDollarSign,
   FileText,
   Files,
+  Landmark,
   LayoutDashboard,
   Menu,
   Package,
@@ -21,6 +22,7 @@ import { Button } from "@/components/ui/button"
 const NAV = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
   { href: "/journal", label: "Journal", icon: ReceiptText },
+  { href: "/cash-bank", label: "Cash & Bank", icon: Landmark },
   { href: "/receivable", label: "Receivable", icon: FileText },
   { href: "/payable", label: "Payable", icon: CircleDollarSign },
   { href: "/documents", label: "Documents", icon: Files },

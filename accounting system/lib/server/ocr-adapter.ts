@@ -1,12 +1,17 @@
 import "server-only"
 
+import { execFile } from "node:child_process"
 import fs from "node:fs/promises"
+import os from "node:os"
 import path from "node:path"
+import { promisify } from "node:util"
 import zlib from "node:zlib"
 import type { NormalizedDocumentFields } from "@/lib/accounting/document-types"
 import { chatCompletionsUrl, fetchAiJson } from "./ai-endpoint"
 import { getServerEnv } from "./env"
 import type { ReceiptRegion } from "./receipt-splitter"
+
+const execFileAsync = promisify(execFile)
 
 export interface OcrResult {
   rawText: string
@@ -67,6 +72,19 @@ function extractReadablePdfText(buffer: Buffer) {
   return Array.from(new Set(snippets)).join("\n")
 }
 
+function analyzePdf(buffer: Buffer) {
+  const latin = buffer.toString("latin1")
+  const pageCount = Math.max(1, (latin.match(/\/Type\s*\/Page\b/g) ?? []).length)
+  const imageCount = (latin.match(/\/Subtype\s*\/Image\b/g) ?? []).length
+  const hasCcittImages = latin.includes("/CCITTFaxDecode")
+  const hasDctImages = latin.includes("/DCTDecode")
+  const producerMatch = latin.match(/\/Producer\s*\(([^)]*)\)/)
+  const header = latin.slice(0, 200)
+  const producer = producerMatch ? decodePdfText(producerMatch[1]) : ""
+  const looksScanned = imageCount > 0 && (hasCcittImages || hasDctImages || /scan|scanner|sharp/i.test(`${producer} ${header}`))
+  return { pageCount, imageCount, hasCcittImages, producer, looksScanned }
+}
+
 function extractPdfTextSnippets(stream: string) {
   const snippets: string[] = []
   for (const match of stream.matchAll(/\((?:\\.|[^\\()])*\)\s*Tj/g)) {
@@ -101,6 +119,33 @@ async function extractLocalText(input: { filePath: string; mimeType: string }) {
     return buffer.toString("utf8").replace(/[^\x20-\x7E]+/g, " ").slice(0, 4000)
   }
   return ""
+}
+
+async function analyzeLocalPdf(input: { filePath: string; mimeType: string }) {
+  if (input.mimeType !== "application/pdf") return null
+  const buffer = await fs.readFile(input.filePath).catch(() => Buffer.alloc(0))
+  return buffer.length > 0 ? analyzePdf(buffer) : null
+}
+
+async function renderPdfPages(input: { filePath: string; maxPages?: number }) {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ocr-pdf-"))
+  const outputPrefix = path.join(tempDir, "page")
+  try {
+    await execFileAsync("pdftoppm", ["-png", "-r", "180", "-f", "1", "-l", String(input.maxPages ?? 3), input.filePath, outputPrefix], {
+      timeout: 90_000,
+      maxBuffer: 1024 * 1024,
+    })
+    const files = (await fs.readdir(tempDir))
+      .filter((file) => /^page-\d+\.png$/.test(file))
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+
+    return Promise.all(files.map(async (file) => ({
+      mimeType: "image/png",
+      bytes: await fs.readFile(path.join(tempDir, file)),
+    })))
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true }).catch(() => undefined)
+  }
 }
 
 function buildFallbackFields(input: { rawText: string; originalFilename: string; aiWarning?: string }) {
@@ -287,24 +332,30 @@ function normalizeAiFields(json: Record<string, unknown>): Partial<NormalizedDoc
   }
 }
 
-async function extractWithGemmaEndpoint(input: { filePath: string; mimeType: string; originalFilename: string }): Promise<OcrResult | null> {
+async function extractWithGemmaEndpoint(input: { filePath: string; mimeType: string; originalFilename: string; pdfAnalysis?: Awaited<ReturnType<typeof analyzeLocalPdf>> }): Promise<OcrResult | null> {
   const env = getServerEnv()
-  if (!env.aiBaseUrl || !input.mimeType.startsWith("image/")) return null
+  if (!env.aiBaseUrl) return null
   if (env.aiProvider !== "openai") {
     throw new Error(`Unsupported LLM_PROVIDER for OCR: ${env.aiProvider}.`)
   }
 
-  const bytes = await fs.readFile(input.filePath)
-  const base64 = bytes.toString("base64")
+  const imageInputs = input.mimeType.startsWith("image/")
+    ? [{ mimeType: input.mimeType, bytes: await fs.readFile(input.filePath) }]
+    : input.mimeType === "application/pdf" && input.pdfAnalysis?.looksScanned
+      ? await renderPdfPages({ filePath: input.filePath, maxPages: Math.min(input.pdfAnalysis.pageCount, 3) })
+      : []
+  if (imageInputs.length === 0) return null
+
   const endpoint = chatCompletionsUrl(env.aiBaseUrl)
   const headers: Record<string, string> = { "Content-Type": "application/json" }
   if (env.aiApiKey) headers.Authorization = `Bearer ${env.aiApiKey}`
 
   const prompt = [
     "You are an OCR and receipt/document extraction engine for an accounting system.",
-    "Extract visible text and structured accounting fields from the image.",
+    "Extract visible text and structured accounting fields from the supplied page image or images.",
     "Return only one JSON object with these keys:",
     "rawText, documentDate, dueDate, documentNumber, currency, vendorName, clientName, taxId, subtotal, otherCharges, taxAmount, totalAmount, paymentMethod, lineItems, warnings.",
+    "For bank statements, include transaction rows in rawText even when totalAmount is 0.",
     "Put service charge, delivery fee, rounding adjustment, and other non-tax charges in otherCharges.",
     "lineItems must contain description, quantity, unitPrice, taxRate, taxAmount, lineTotal.",
     "Use MYR when currency is unclear. Use YYYY-MM-DD dates. Use 0 for unknown numeric values.",
@@ -322,7 +373,10 @@ async function extractWithGemmaEndpoint(input: { filePath: string; mimeType: str
           role: "user",
           content: [
             { type: "text", text: `Extract accounting OCR data from ${input.originalFilename}.` },
-            { type: "image_url", image_url: { url: `data:${input.mimeType};base64,${base64}`, detail: "high" } },
+            ...imageInputs.map((image) => ({
+              type: "image_url",
+              image_url: { url: `data:${image.mimeType};base64,${image.bytes.toString("base64")}`, detail: "high" },
+            })),
           ],
         },
       ],
@@ -337,6 +391,7 @@ async function extractWithGemmaEndpoint(input: { filePath: string; mimeType: str
     rawText: stringValue(json.rawText, content),
     fields,
     confidence: 0.9,
+    pageCount: input.mimeType === "application/pdf" ? imageInputs.length : undefined,
     engine: `gemma-endpoint:${env.aiModel}`,
   }
 }
@@ -357,7 +412,8 @@ export class MockOcrAdapter implements OcrAdapter {
     let aiWarning = !env.aiBaseUrl
       ? "AI OCR is not configured. Add URL, LLM_MODEL, LLM_PROVIDER, and BEARER_TOKEN to accounting system/.env.local, then restart the dev server."
       : undefined
-    const aiResult = await extractWithGemmaEndpoint(input).catch((error) => {
+    const pdfAnalysis = await analyzeLocalPdf(input)
+    const aiResult = await extractWithGemmaEndpoint({ ...input, pdfAnalysis }).catch((error) => {
       aiWarning = error instanceof Error ? `AI OCR failed: ${error.message}` : "AI OCR failed."
       console.error(error)
       return null
@@ -366,13 +422,27 @@ export class MockOcrAdapter implements OcrAdapter {
 
     const baseName = path.basename(input.originalFilename, path.extname(input.originalFilename))
     const fileText = await extractLocalText(input)
+    if (input.mimeType === "application/pdf" && pdfAnalysis?.looksScanned && fileText.trim().length < 20) {
+      const scannerNote = pdfAnalysis.hasCcittImages
+        ? "This PDF is a scanned black-and-white image PDF. PDF page rendering was attempted; if OCR still failed, check that Poppler is installed in the running server container and the Gemma endpoint is reachable."
+        : "This PDF appears to be scanned image pages. PDF page rendering was attempted; if OCR still failed, check that Poppler is installed in the running server container and the Gemma endpoint is reachable."
+      aiWarning = [aiWarning, scannerNote].filter(Boolean).join(" ")
+    }
     const rawText = [fileText.trim(), baseName.replace(/[-_]+/g, " ")].filter(Boolean).join("\n") || `Captured document ${input.originalFilename}`
     const fields = buildFallbackFields({ rawText: fileText.trim(), originalFilename: input.originalFilename, aiWarning })
 
     return {
       rawText,
-      confidence: input.mimeType.startsWith("image/") ? 0.45 : fileText.trim().length > 80 ? 0.84 : fileText.trim() ? 0.72 : 0.4,
-      pageCount: input.mimeType === "application/pdf" ? 1 : undefined,
+      confidence: input.mimeType.startsWith("image/")
+        ? 0.45
+        : pdfAnalysis?.looksScanned && fileText.trim().length < 20
+          ? 0.2
+          : fileText.trim().length > 80
+            ? 0.84
+            : fileText.trim()
+              ? 0.72
+              : 0.4,
+      pageCount: input.mimeType === "application/pdf" ? pdfAnalysis?.pageCount ?? 1 : undefined,
       engine: "mock-local-ocr",
       fields,
     }

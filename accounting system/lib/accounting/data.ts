@@ -17,7 +17,7 @@ import type {
 export const demoAccounts: Account[] = [
   { id: "1000", code: "1000", name: "Cash on Hand", type: "asset" },
   { id: "1010", code: "1010", name: "Bank Account", type: "asset" },
-  { id: "1200", code: "1200", name: "Accounts Receivable", type: "asset" },
+  { id: "1200", code: "1200", name: "Trade Receivables", type: "asset" },
   { id: "1300", code: "1300", name: "Inventory", type: "asset" },
   { id: "1500", code: "1500", name: "Fixed Assets - Equipment", type: "asset" },
   { id: "1590", code: "1590", name: "Accumulated Depreciation", type: "asset" },

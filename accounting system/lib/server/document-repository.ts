@@ -377,7 +377,7 @@ function needsReview(ocrConfidence: number | undefined, categoryConfidence: numb
   if (categoryConfidence < HIGH_CONFIDENCE) warnings.push("Category confidence is below 85%.")
   if (category === "unknown") warnings.push("Category is unknown.")
   if (!fields.documentDate) warnings.push("Document date is required.")
-  if (!Number.isFinite(fields.totalAmount) || fields.totalAmount <= 0) warnings.push("Total amount must be greater than zero.")
+  if (category !== "bank_document" && (!Number.isFinite(fields.totalAmount) || fields.totalAmount <= 0)) warnings.push("Total amount must be greater than zero.")
   if (Math.abs(Number((fields.subtotal + otherCharges + fields.taxAmount - fields.totalAmount).toFixed(2))) > 0.02) warnings.push("Subtotal plus charges plus tax does not match total.")
   const journalEntry: JournalEntry = { id: "validation", date: fields.documentDate || new Date().toISOString().slice(0, 10), description: "Validation", lines }
   if (lines.length > 0 && !isJournalEntryBalanced(journalEntry)) warnings.push("Suggested journal entry is not balanced.")
@@ -389,7 +389,7 @@ async function processOneDocument(id: string) {
   if (!row) throw new Error("Document was not found.")
   try {
     await query("UPDATE documents SET processing_status = 'ocr_processing', updated_at = NOW() WHERE id = $1 AND company_id = $2", [id, DEFAULT_COMPANY_ID])
-    const ocr = await ocrAdapter.extract({ filePath: row.storage_path, mimeType: row.mime_type, originalFilename: row.original_filename })
+    const ocr = await ocrAdapter.extract({ filePath: resolveStoredDocumentPath(row.storage_path), mimeType: row.mime_type, originalFilename: row.original_filename })
     const category = await categorizationAdapter.categorize({ rawText: ocr.rawText, extractedFields: ocr.fields })
     const warnings = needsReview(ocr.confidence, category.confidence, category.category, category.normalizedFields, category.suggestedJournalLines)
     const normalizedFields = { ...category.normalizedFields, warnings }

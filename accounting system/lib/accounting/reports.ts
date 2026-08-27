@@ -29,6 +29,7 @@ export interface TrialBalanceRow {
 }
 
 export interface GeneralLedgerLine {
+  journalEntryId: string
   accountId: string
   accountName: string
   date: string
@@ -111,6 +112,7 @@ export function buildGeneralLedger(accounts: Account[], entries: JournalEntry[])
         const nextBalance = (running.get(line.accountId) ?? 0) + movement
         running.set(line.accountId, nextBalance)
         return {
+          journalEntryId: entry.id,
           accountId: line.accountId,
           accountName: account?.name ?? line.accountId,
           date: entry.date,

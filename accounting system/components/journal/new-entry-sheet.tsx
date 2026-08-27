@@ -146,44 +146,53 @@ export function NewEntrySheet() {
           <Separator />
 
           <div className="space-y-3">
-            <div className="grid grid-cols-[1fr_88px_88px_32px] items-center gap-2 px-1 text-xs text-muted-foreground">
+            <div className="hidden grid-cols-[1fr_88px_88px_32px] items-center gap-2 px-1 text-xs font-medium text-muted-foreground sm:grid">
               <span>Account</span>
               <span className="text-right">Debit</span>
               <span className="text-right">Credit</span>
               <span />
             </div>
             {lines.map((line) => (
-              <div key={line.key} className="grid grid-cols-[1fr_88px_88px_32px] items-center gap-2">
-                <Select value={line.accountId} onValueChange={(v) => updateLine(line.key, { accountId: v ?? "" })}>
-                  <SelectTrigger className="w-full">
-                    <SelectValue placeholder="Select account" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {accounts.map((a) => (
-                      <SelectItem key={a.id} value={a.id}>
-                        <span className="font-mono text-xs text-muted-foreground">{a.code}</span> {a.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <Input
-                  inputMode="decimal"
-                  placeholder="0.00"
-                  className="text-right font-mono"
-                  value={line.debit}
-                  onChange={(e) => updateLine(line.key, { debit: e.target.value, credit: "" })}
-                />
-                <Input
-                  inputMode="decimal"
-                  placeholder="0.00"
-                  className="text-right font-mono"
-                  value={line.credit}
-                  onChange={(e) => updateLine(line.key, { credit: e.target.value, debit: "" })}
-                />
+              <div key={line.key} className="grid gap-2 rounded-md border border-border p-3 sm:grid-cols-[1fr_88px_88px_32px] sm:items-end sm:border-0 sm:p-0">
+                <div className="grid gap-1">
+                  <Label className="text-xs text-muted-foreground sm:hidden">Account</Label>
+                  <Select value={line.accountId} onValueChange={(v) => updateLine(line.key, { accountId: v ?? "" })}>
+                    <SelectTrigger className="w-full">
+                      <SelectValue placeholder="Select account" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {accounts.map((a) => (
+                        <SelectItem key={a.id} value={a.id}>
+                          <span className="font-mono text-xs text-muted-foreground">{a.code}</span> {a.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="grid gap-1">
+                  <Label className="text-xs text-muted-foreground sm:hidden">Debit</Label>
+                  <Input
+                    inputMode="decimal"
+                    placeholder="0.00"
+                    className="text-right font-mono"
+                    value={line.debit}
+                    onChange={(e) => updateLine(line.key, { debit: e.target.value, credit: "" })}
+                  />
+                </div>
+                <div className="grid gap-1">
+                  <Label className="text-xs text-muted-foreground sm:hidden">Credit</Label>
+                  <Input
+                    inputMode="decimal"
+                    placeholder="0.00"
+                    className="text-right font-mono"
+                    value={line.credit}
+                    onChange={(e) => updateLine(line.key, { credit: e.target.value, debit: "" })}
+                  />
+                </div>
                 <Button
                   variant="ghost"
                   size="icon"
-                  className="size-8 text-muted-foreground"
+                  className="size-8 justify-self-end text-muted-foreground sm:justify-self-auto"
                   aria-label="Delete line"
                   onClick={() => setLines((prev) => (prev.length > 2 ? prev.filter((l) => l.key !== line.key) : prev))}
                 >

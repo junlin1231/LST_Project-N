@@ -127,26 +127,30 @@ export async function POST(request: NextRequest) {
           ),
         )
       case "createInvoice":
-        return NextResponse.json(await createInvoice(body.invoice as Omit<Invoice, "id" | "number">))
+        await createInvoice(body.invoice as Omit<Invoice, "id" | "number">)
+        return NextResponse.json(await listAccountingData())
       case "createVendorBill":
-        return NextResponse.json(await createVendorBill(body.bill as Omit<VendorBill, "id" | "billNumber">))
+        await createVendorBill(body.bill as Omit<VendorBill, "id" | "billNumber">)
+        return NextResponse.json(await listAccountingData())
       case "createReceipt":
         return NextResponse.json(await createReceipt(body.receipt as Omit<Receipt, "id" | "receiptNumber" | "status">))
       case "createPaymentVoucher":
         return NextResponse.json(await createPaymentVoucher(body.voucher as Omit<PaymentVoucher, "id" | "voucherNumber" | "status">))
       case "createWorkflowDocument":
-        return NextResponse.json(await createWorkflowDocument(body.document as Omit<WorkflowDocument, "id" | "documentNumber">))
+        await createWorkflowDocument(body.document as Omit<WorkflowDocument, "id" | "documentNumber">)
+        return NextResponse.json(await listAccountingData())
       case "updateWorkflowDocument":
-        return NextResponse.json(await updateWorkflowDocument(String(body.id), body.document as Omit<WorkflowDocument, "id" | "documentNumber" | "documentType">))
+        await updateWorkflowDocument(String(body.id), body.document as Omit<WorkflowDocument, "id" | "documentNumber" | "documentType">)
+        return NextResponse.json(await listAccountingData())
       case "updateInvoiceStatus":
         await updateInvoiceStatus(String(body.id), body.status as Invoice["status"], body.confirmation as ConfirmationMetadata)
-        return NextResponse.json({ ok: true })
+        return NextResponse.json(await listAccountingData())
       case "updateVendorBillStatus":
         await updateVendorBillStatus(String(body.id), body.status as VendorBill["status"], body.confirmation as ConfirmationMetadata)
-        return NextResponse.json({ ok: true })
+        return NextResponse.json(await listAccountingData())
       case "updateWorkflowDocumentStatus":
         await updateWorkflowDocumentStatus(String(body.id), String(body.status), body.confirmation as ConfirmationMetadata)
-        return NextResponse.json({ ok: true })
+        return NextResponse.json(await listAccountingData())
       case "postInvoiceByRule":
         return NextResponse.json(await postInvoiceByRuleById(String(body.invoiceId)))
       case "postPaymentReceiptByRule":

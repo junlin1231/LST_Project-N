@@ -13,9 +13,37 @@ export interface ServerEnv {
   ownEntityNames: string[]
 }
 
+function localEnvPaths() {
+  const cwd = process.cwd()
+  return Array.from(new Set([
+    path.join(cwd, ".env.local"),
+    path.join(cwd, "accounting system", ".env.local"),
+    path.join(cwd, "..", ".env.local"),
+    path.join(cwd, "..", "accounting system", ".env.local"),
+  ].map((candidate) => path.resolve(candidate))))
+}
+
+export function getServerEnvDiagnostics() {
+  const localEnv = readLocalEnvFile()
+  const aiBaseUrl = envValue(localEnv, "URL", "AI_BASE_URL")
+  const aiApiKey = envValue(localEnv, "BEARER_TOKEN", "AI_API_KEY")
+  return {
+    cwd: process.cwd(),
+    checkedEnvPaths: localEnvPaths(),
+    localEnvKeys: Object.keys(localEnv).sort(),
+    hasDatabaseUrl: !!envValue(localEnv, "DATABASE_URL"),
+    hasAiBaseUrl: !!aiBaseUrl,
+    aiBaseUrl,
+    hasAiApiKey: !!aiApiKey,
+    aiModel: envValue(localEnv, "LLM_MODEL", "LLM_GEMMA4_MODEL", "AI_MODEL") ?? "gemma-4",
+    aiProvider: (envValue(localEnv, "LLM_PROVIDER") ?? "openai").toLowerCase(),
+    ownEntityNameCount: envList(localEnv, "OCR_OWN_NAMES", "COMPANY_ALIASES", "COMPANY_NAME").length,
+  }
+}
+
 function readLocalEnvFile() {
-  const envPath = path.join(process.cwd(), ".env.local")
-  if (!fs.existsSync(envPath)) return {}
+  const envPath = localEnvPaths().find((candidate) => fs.existsSync(candidate))
+  if (!envPath) return {}
   const content = fs.readFileSync(envPath, "utf8")
   const values: Record<string, string> = {}
   for (const line of content.split(/\r?\n/)) {

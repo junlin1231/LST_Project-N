@@ -54,12 +54,18 @@ import type {
   WorkflowDocumentLine,
 } from "@/lib/accounting/types"
 import { buildDepreciationScheduleDrafts, buildPeriodClosePreview, DEFAULT_RETAINED_EARNINGS_ACCOUNT_ID } from "@/lib/accounting/reports"
+import { DEFAULT_ACCOUNTING_RULE_CONFIG, roundMoney } from "@/lib/accounting/rules"
 import { ensureDatabaseReady, query, transaction, type DbExecutor } from "./db"
 
 const DEFAULT_COMPANY_ID = "company-demo"
 const DEFAULT_USER_ID = "user-demo-admin"
 
 export { DEFAULT_COMPANY_ID, DEFAULT_USER_ID }
+
+function ocrStorageRoot() {
+  if (process.env.OCR_STORAGE_DIR?.trim()) return path.resolve(process.env.OCR_STORAGE_DIR.trim())
+  return path.resolve(process.cwd(), "..", "ocr", "scanned_docs")
+}
 
 interface AccountRow {
   id: string
@@ -900,6 +906,98 @@ export async function insertJournalEntry(db: DbExecutor, entry: JournalEntry) {
   }
 }
 
+async function ensurePostingAccounts(db: DbExecutor) {
+  const accounts = [
+    { id: DEFAULT_ACCOUNTING_RULE_CONFIG.accountsReceivableAccountId, code: "1200", name: "Trade Receivables", type: "asset" },
+    { id: DEFAULT_ACCOUNTING_RULE_CONFIG.cashAccountId, code: "1010", name: "Cash / Bank", type: "asset" },
+    { id: DEFAULT_ACCOUNTING_RULE_CONFIG.revenueAccountId, code: "4000", name: "Sales Revenue", type: "revenue" },
+    { id: DEFAULT_ACCOUNTING_RULE_CONFIG.taxPayableAccountId, code: "2100", name: "Tax Payable", type: "liability" },
+    { id: DEFAULT_ACCOUNTING_RULE_CONFIG.expenseAccountId, code: "5300", name: "General Expenses", type: "expense" },
+    { id: DEFAULT_ACCOUNTING_RULE_CONFIG.accountsPayableAccountId, code: "2000", name: "Accounts Payable", type: "liability" },
+  ]
+
+  for (const account of accounts) {
+    await exec(
+      db,
+      `INSERT INTO accounts (id, company_id, code, name, type)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, updated_at = NOW()`,
+      [account.id, DEFAULT_COMPANY_ID, account.code, account.name, account.type],
+    )
+  }
+}
+
+function invoiceTotalAmount(invoice: Pick<Invoice, "items" | "taxRate">) {
+  const subtotal = invoice.items.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0)
+  const tax = roundMoney(subtotal * (invoice.taxRate / 100))
+  return { subtotal: roundMoney(subtotal), tax, total: roundMoney(subtotal + tax) }
+}
+
+function invoicePostingEntry(invoice: Invoice): JournalEntry {
+  const amounts = invoiceTotalAmount(invoice)
+  return {
+    id: `je-inv-${randomUUID()}`,
+    date: invoice.issueDate,
+    description: `Post invoice ${invoice.number}`,
+    reference: invoice.number,
+    status: "posted",
+    postedAt: new Date().toISOString(),
+    lines: [
+      { accountId: DEFAULT_ACCOUNTING_RULE_CONFIG.accountsReceivableAccountId, debit: amounts.total, credit: 0 },
+      { accountId: DEFAULT_ACCOUNTING_RULE_CONFIG.revenueAccountId, debit: 0, credit: amounts.subtotal },
+      { accountId: DEFAULT_ACCOUNTING_RULE_CONFIG.taxPayableAccountId, debit: 0, credit: amounts.tax },
+    ].filter((line) => line.debit > 0 || line.credit > 0),
+  }
+}
+
+function vendorBillPostingEntry(bill: VendorBill): JournalEntry {
+  return {
+    id: `je-bill-${randomUUID()}`,
+    date: bill.billDate,
+    description: `Post vendor bill ${bill.billNumber}`,
+    reference: bill.billNumber,
+    status: "posted",
+    postedAt: new Date().toISOString(),
+    lines: [
+      { accountId: DEFAULT_ACCOUNTING_RULE_CONFIG.expenseAccountId, debit: roundMoney(bill.subtotal), credit: 0 },
+      { accountId: DEFAULT_ACCOUNTING_RULE_CONFIG.taxPayableAccountId, debit: roundMoney(bill.taxAmount), credit: 0 },
+      { accountId: DEFAULT_ACCOUNTING_RULE_CONFIG.accountsPayableAccountId, debit: 0, credit: roundMoney(bill.totalAmount) },
+    ].filter((line) => line.debit > 0 || line.credit > 0),
+  }
+}
+
+function receiptPostingEntry(receipt: Receipt): JournalEntry {
+  const amount = roundMoney(receipt.amount)
+  return {
+    id: receipt.journalEntryId ?? `je-rcpt-${randomUUID()}`,
+    date: receipt.receiptDate,
+    description: `Post receipt ${receipt.receiptNumber}`,
+    reference: receipt.receiptNumber,
+    status: "posted",
+    postedAt: new Date().toISOString(),
+    lines: [
+      { accountId: DEFAULT_ACCOUNTING_RULE_CONFIG.cashAccountId, debit: amount, credit: 0 },
+      { accountId: DEFAULT_ACCOUNTING_RULE_CONFIG.accountsReceivableAccountId, debit: 0, credit: amount },
+    ],
+  }
+}
+
+function paymentVoucherPostingEntry(voucher: PaymentVoucher): JournalEntry {
+  const amount = roundMoney(voucher.amount)
+  return {
+    id: voucher.journalEntryId ?? `je-pv-${randomUUID()}`,
+    date: voucher.paymentDate,
+    description: `Post payment voucher ${voucher.voucherNumber}`,
+    reference: voucher.voucherNumber,
+    status: "posted",
+    postedAt: new Date().toISOString(),
+    lines: [
+      { accountId: DEFAULT_ACCOUNTING_RULE_CONFIG.accountsPayableAccountId, debit: amount, credit: 0 },
+      { accountId: DEFAULT_ACCOUNTING_RULE_CONFIG.cashAccountId, debit: 0, credit: amount },
+    ],
+  }
+}
+
 async function insertInvoice(db: DbExecutor, invoice: Invoice) {
   await exec(
     db,
@@ -1693,6 +1791,13 @@ export async function createInvoice(invoice: Omit<Invoice, "id" | "number">) {
   const created: Invoice = { ...invoice, id: `inv-${randomUUID()}`, number }
   await transaction(async (client) => {
     await insertInvoice(client, created)
+    if (created.status !== "draft") {
+      await ensurePostingAccounts(client)
+      await insertJournalEntry(client, invoicePostingEntry(created))
+    }
+    if (created.status === "paid") {
+      await createReceiptForInvoice(client, created, invoiceTotalAmount(created).total, created.issueDate)
+    }
   })
   return created
 }
@@ -1711,6 +1816,13 @@ export async function createVendorBill(bill: Omit<VendorBill, "id" | "billNumber
   const created: VendorBill = { ...bill, id: `vb-${randomUUID()}`, billNumber }
   await transaction(async (client) => {
     await insertVendorBill(client, created)
+    if (created.status !== "draft" && created.status !== "void") {
+      await ensurePostingAccounts(client)
+      await insertJournalEntry(client, vendorBillPostingEntry(created))
+    }
+    if (created.status === "paid") {
+      await createPaymentVoucherForBill(client, created.id, created.totalAmount, created.billDate)
+    }
   })
   return created
 }
@@ -1730,6 +1842,10 @@ export async function createReceipt(receipt: Omit<Receipt, "id" | "receiptNumber
   }
 
   await transaction(async (client) => {
+    await ensurePostingAccounts(client)
+    const journalEntry = receiptPostingEntry(created)
+    created.journalEntryId = journalEntry.id
+    await insertJournalEntry(client, journalEntry)
     await insertReceipt(client, created)
     if (created.invoiceId) {
       await insertPaymentAllocation(client, {
@@ -1774,6 +1890,10 @@ export async function createPaymentVoucher(voucher: Omit<PaymentVoucher, "id" | 
   }
 
   await transaction(async (client) => {
+    await ensurePostingAccounts(client)
+    const journalEntry = paymentVoucherPostingEntry(created)
+    created.journalEntryId = journalEntry.id
+    await insertJournalEntry(client, journalEntry)
     await insertPaymentVoucher(client, created)
     if (created.vendorBillId) {
       await insertPaymentAllocation(client, {
@@ -1806,6 +1926,75 @@ export async function createPaymentVoucher(voucher: Omit<PaymentVoucher, "id" | 
   })
 
   return listAccountingData()
+}
+
+async function allocatedAmount(db: DbExecutor, targetType: PaymentAllocation["targetType"], targetId: string) {
+  const result = await exec(
+    db,
+    "SELECT COALESCE(SUM(amount), 0)::text AS amount FROM payment_allocations WHERE company_id = $1 AND target_type = $2 AND target_id = $3",
+    [DEFAULT_COMPANY_ID, targetType, targetId],
+  )
+  return Number((result.rows[0] as { amount: string } | undefined)?.amount ?? 0)
+}
+
+async function createReceiptForInvoice(db: DbExecutor, invoice: Invoice, amount: number, receiptDate: string) {
+  const roundedAmount = roundMoney(amount)
+  if (roundedAmount <= 0) return null
+
+  await ensurePostingAccounts(db)
+  const receiptCount = await exec(db, "SELECT COUNT(*) AS count FROM receipts WHERE company_id = $1", [DEFAULT_COMPANY_ID])
+  const receipt: Receipt = {
+    id: `rcpt-${randomUUID()}`,
+    invoiceId: invoice.id,
+    journalEntryId: `je-rcpt-${randomUUID()}`,
+    receiptNumber: `RCPT-2026-${String(Number((receiptCount.rows[0] as { count: string } | undefined)?.count ?? 0) + 1).padStart(3, "0")}`,
+    receiptDate,
+    amount: roundedAmount,
+    status: "posted",
+  }
+
+  await insertJournalEntry(db, receiptPostingEntry(receipt))
+  await insertReceipt(db, receipt)
+  await insertPaymentAllocation(db, {
+    id: `alloc-${randomUUID()}`,
+    sourceType: "receipt",
+    sourceId: receipt.id,
+    targetType: "invoice",
+    targetId: invoice.id,
+    amount: roundedAmount,
+    allocatedAt: `${receiptDate}T00:00:00.000Z`,
+  })
+  return receipt
+}
+
+async function createPaymentVoucherForBill(db: DbExecutor, vendorBillId: string, amount: number, paymentDate: string) {
+  const roundedAmount = roundMoney(amount)
+  if (roundedAmount <= 0) return null
+
+  await ensurePostingAccounts(db)
+  const voucherCount = await exec(db, "SELECT COUNT(*) AS count FROM payment_vouchers WHERE company_id = $1", [DEFAULT_COMPANY_ID])
+  const voucher: PaymentVoucher = {
+    id: `pv-${randomUUID()}`,
+    vendorBillId,
+    journalEntryId: `je-pv-${randomUUID()}`,
+    voucherNumber: `PV-2026-${String(Number((voucherCount.rows[0] as { count: string } | undefined)?.count ?? 0) + 1).padStart(3, "0")}`,
+    paymentDate,
+    amount: roundedAmount,
+    status: "posted",
+  }
+
+  await insertJournalEntry(db, paymentVoucherPostingEntry(voucher))
+  await insertPaymentVoucher(db, voucher)
+  await insertPaymentAllocation(db, {
+    id: `alloc-${randomUUID()}`,
+    sourceType: "payment_voucher",
+    sourceId: voucher.id,
+    targetType: "vendor_bill",
+    targetId: vendorBillId,
+    amount: roundedAmount,
+    allocatedAt: `${paymentDate}T00:00:00.000Z`,
+  })
+  return voucher
 }
 
 const WORKFLOW_PREFIX: Record<WorkflowDocument["documentType"], string> = {
@@ -2091,6 +2280,16 @@ export async function updateInvoiceStatus(id: string, status: Invoice["status"],
   }
 
   await transaction(async (client) => {
+    if (existing.status === "draft" && status !== "draft") {
+      await ensurePostingAccounts(client)
+      await insertJournalEntry(client, invoicePostingEntry({ ...existing, status }))
+    }
+    if (status === "paid") {
+      const amounts = invoiceTotalAmount(existing)
+      const alreadyAllocated = await allocatedAmount(client, "invoice", id)
+      const remaining = roundMoney(amounts.total - alreadyAllocated)
+      await createReceiptForInvoice(client, existing, remaining, new Date().toISOString().slice(0, 10))
+    }
     await exec(client, "UPDATE invoices SET status = $1, updated_at = NOW() WHERE id = $2 AND company_id = $3", [status, id, DEFAULT_COMPANY_ID])
     await insertAuditLog(client, "invoice.status.update", "invoice", id, confirmation, {
       fromStatus: existing.status,
@@ -2111,6 +2310,16 @@ export async function updateVendorBillStatus(id: string, status: VendorBill["sta
   if (!bill) throw new Error("Vendor bill was not found.")
 
   await transaction(async (client) => {
+    const mappedBill = mapVendorBill(bill)
+    if (mappedBill.status === "draft" && status !== "draft" && status !== "void") {
+      await ensurePostingAccounts(client)
+      await insertJournalEntry(client, vendorBillPostingEntry({ ...mappedBill, status }))
+    }
+    if (status === "paid") {
+      const alreadyAllocated = await allocatedAmount(client, "vendor_bill", id)
+      const remaining = roundMoney(mappedBill.totalAmount - alreadyAllocated)
+      await createPaymentVoucherForBill(client, id, remaining, new Date().toISOString().slice(0, 10))
+    }
     await exec(client, "UPDATE vendor_bills SET status = $1, updated_at = NOW() WHERE id = $2 AND company_id = $3", [status, id, DEFAULT_COMPANY_ID])
     await insertAuditLog(client, "vendor_bill.status.update", "vendor_bill", id, confirmation, {
       fromStatus: bill.status,

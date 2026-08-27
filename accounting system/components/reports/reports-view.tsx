@@ -1,7 +1,7 @@
 "use client"
 
 import { useMemo, useState } from "react"
-import { Calculator, CalendarDays, Download, Landmark, Plus, Save } from "lucide-react"
+import { Calculator, CalendarDays, Download, FileText, Landmark, Plus, Save } from "lucide-react"
 import { Amount } from "@/components/amount"
 import { ConfirmationDialog } from "@/components/governance/confirmation-dialog"
 import { Badge } from "@/components/ui/badge"
@@ -15,7 +15,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { UPDATE_CONFIRMATION_PHRASE } from "@/lib/accounting/governance"
 import { useAccounting } from "@/lib/accounting/store"
-import { formatDate } from "@/lib/accounting/utils"
+import { formatDate, invoiceTotal } from "@/lib/accounting/utils"
 import {
   buildCashFlowReport,
   buildChangesInEquity,
@@ -28,13 +28,54 @@ import {
   calculateMonthlyDepreciation,
   DEFAULT_RETAINED_EARNINGS_ACCOUNT_ID,
 } from "@/lib/accounting/reports"
-import { ACCOUNT_TYPE_LABEL, type Account, type DepreciationSchedule, type FixedAsset, type ReportSection } from "@/lib/accounting/types"
+import { ACCOUNT_TYPE_LABEL, type Account, type DepreciationSchedule, type FixedAsset, type JournalEntry, type ReportLine, type ReportSection, type WorkflowDocumentType } from "@/lib/accounting/types"
 
 const today = new Date().toISOString().slice(0, 10)
 const yearStart = `${today.slice(0, 4)}-01-01`
 const trialBalanceTypeOrder: Account["type"][] = ["asset", "liability", "equity", "revenue", "expense"]
 
-function SectionTable({ section }: { section: ReportSection }) {
+type DrillMode = "account-period" | "account-as-of" | "cash-flow-line" | "ledger-entry"
+
+interface DrillTarget {
+  title: string
+  subtitle: string
+  mode: DrillMode
+  accountId?: string
+  journalEntryId?: string
+  cashFlowLabel?: string
+}
+
+interface RelatedDocument {
+  id: string
+  number: string
+  type: string
+  party?: string
+  date: string
+  status: string
+  amount: number
+}
+
+function titleCase(value: string) {
+  return value.split("_").map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(" ")
+}
+
+function documentTypeLabel(type: WorkflowDocumentType) {
+  return titleCase(type)
+}
+
+function isPosted(entry: JournalEntry) {
+  return entry.status !== "draft"
+}
+
+function isCashBankAccount(account?: Account) {
+  return account?.type === "asset" && /cash|bank/i.test(`${account.code} ${account.name}`)
+}
+
+function entryAffectsAccount(entry: JournalEntry, accountId: string) {
+  return entry.lines.some((line) => line.accountId === accountId)
+}
+
+function SectionTable({ section, onLineClick }: { section: ReportSection; onLineClick?: (line: ReportLine) => void }) {
   return (
     <Table>
       <TableHeader>
@@ -45,7 +86,20 @@ function SectionTable({ section }: { section: ReportSection }) {
       </TableHeader>
       <TableBody>
         {section.lines.map((line) => (
-          <TableRow key={`${section.label}-${line.accountId}-${line.name}`}>
+          <TableRow
+            key={`${section.label}-${line.accountId}-${line.name}`}
+            role={onLineClick ? "button" : undefined}
+            tabIndex={onLineClick ? 0 : undefined}
+            className={onLineClick ? "cursor-pointer" : undefined}
+            onClick={() => onLineClick?.(line)}
+            onKeyDown={(event) => {
+              if (!onLineClick) return
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault()
+                onLineClick(line)
+              }
+            }}
+          >
             <TableCell><span className="font-mono text-xs text-muted-foreground">{line.code}</span> {line.name}</TableCell>
             <TableCell className="text-right"><Amount value={line.amount} colorBySign /></TableCell>
           </TableRow>
@@ -109,9 +163,13 @@ function ExportButton({ label, onClick }: { label: string; onClick: () => void }
 export function ReportsView() {
   const {
     accounts,
+    contacts,
     journalEntries,
     invoices,
     vendorBills,
+    receipts,
+    paymentVouchers,
+    workflowDocuments,
     stockBalances,
     fixedAssets,
     depreciationSchedules,
@@ -135,6 +193,7 @@ export function ReportsView() {
   const [closeMessage, setCloseMessage] = useState("")
   const [pendingClose, setPendingClose] = useState(false)
   const [retainedEarningsAccountId, setRetainedEarningsAccountId] = useState(DEFAULT_RETAINED_EARNINGS_ACCOUNT_ID)
+  const [drillTarget, setDrillTarget] = useState<DrillTarget | null>(null)
 
   const trialBalance = useMemo(() => buildTrialBalance(accounts, journalEntries.filter((entry) => entry.date <= periodEnd)), [accounts, journalEntries, periodEnd])
   const trialBalanceSections = useMemo(() => trialBalanceTypeOrder
@@ -164,6 +223,154 @@ export function ReportsView() {
   const assetAccounts = accounts.filter((account) => account.type === "asset")
   const expenseAccounts = accounts.filter((account) => account.type === "expense")
   const equityAccounts = accounts.filter((account) => account.type === "equity")
+  const accountById = useMemo(() => new Map(accounts.map((account) => [account.id, account])), [accounts])
+  const contactName = (id?: string) => contacts.find((contact) => contact.id === id)?.name ?? "-"
+
+  const drillEntries = useMemo(() => {
+    if (!drillTarget) return []
+    const postedEntries = journalEntries.filter(isPosted)
+    if (drillTarget.mode === "ledger-entry") {
+      return postedEntries.filter((entry) => entry.id === drillTarget.journalEntryId)
+    }
+    if (drillTarget.mode === "account-as-of" && drillTarget.accountId) {
+      return postedEntries.filter((entry) => entry.date <= periodEnd && entryAffectsAccount(entry, drillTarget.accountId!))
+    }
+    if (drillTarget.mode === "account-period" && drillTarget.accountId) {
+      return postedEntries.filter((entry) => entry.date >= periodStart && entry.date <= periodEnd && entryAffectsAccount(entry, drillTarget.accountId!))
+    }
+    if (drillTarget.mode === "cash-flow-line" && drillTarget.cashFlowLabel) {
+      return postedEntries.filter((entry) => {
+        if (entry.date < periodStart || entry.date > periodEnd || entry.description !== drillTarget.cashFlowLabel) return false
+        return entry.lines.some((line) => isCashBankAccount(accountById.get(line.accountId)))
+      })
+    }
+    return []
+  }, [accountById, drillTarget, journalEntries, periodEnd, periodStart])
+
+  const relatedDocuments = useMemo<RelatedDocument[]>(() => {
+    if (!drillTarget) return []
+    const references = new Set(drillEntries.map((entry) => entry.reference?.trim()).filter(Boolean))
+    const entryIds = new Set(drillEntries.map((entry) => entry.id))
+    const related: RelatedDocument[] = []
+
+    for (const receipt of receipts) {
+      if (!entryIds.has(receipt.journalEntryId ?? "") && !references.has(receipt.receiptNumber)) continue
+      const invoice = receipt.invoiceId ? invoices.find((record) => record.id === receipt.invoiceId) : undefined
+      related.push({
+        id: receipt.id,
+        number: receipt.receiptNumber,
+        type: "Receipt",
+        party: invoice ? contactName(invoice.clientId) : "Unapplied",
+        date: receipt.receiptDate,
+        status: receipt.status,
+        amount: receipt.amount,
+      })
+      if (invoice && !related.some((document) => document.id === invoice.id)) {
+        related.push({
+          id: invoice.id,
+          number: invoice.number,
+          type: "Invoice",
+          party: contactName(invoice.clientId),
+          date: invoice.issueDate,
+          status: invoice.status,
+          amount: invoiceTotal(invoice),
+        })
+      }
+    }
+
+    for (const voucher of paymentVouchers) {
+      if (!entryIds.has(voucher.journalEntryId ?? "") && !references.has(voucher.voucherNumber)) continue
+      const bill = voucher.vendorBillId ? vendorBills.find((record) => record.id === voucher.vendorBillId) : undefined
+      related.push({
+        id: voucher.id,
+        number: voucher.voucherNumber,
+        type: "Payment Voucher",
+        party: bill ? contactName(bill.vendorId) : "Vendor Advance",
+        date: voucher.paymentDate,
+        status: voucher.status,
+        amount: voucher.amount,
+      })
+      if (bill && !related.some((document) => document.id === bill.id)) {
+        related.push({
+          id: bill.id,
+          number: bill.billNumber,
+          type: "Vendor Bill",
+          party: contactName(bill.vendorId),
+          date: bill.billDate,
+          status: bill.status,
+          amount: bill.totalAmount,
+        })
+      }
+    }
+
+    for (const invoice of invoices) {
+      if (!references.has(invoice.number) || related.some((document) => document.id === invoice.id)) continue
+      related.push({
+        id: invoice.id,
+        number: invoice.number,
+        type: "Invoice",
+        party: contactName(invoice.clientId),
+        date: invoice.issueDate,
+        status: invoice.status,
+        amount: invoiceTotal(invoice),
+      })
+    }
+
+    for (const bill of vendorBills) {
+      if (!references.has(bill.billNumber) || related.some((document) => document.id === bill.id)) continue
+      related.push({
+        id: bill.id,
+        number: bill.billNumber,
+        type: "Vendor Bill",
+        party: contactName(bill.vendorId),
+        date: bill.billDate,
+        status: bill.status,
+        amount: bill.totalAmount,
+      })
+    }
+
+    for (const document of workflowDocuments) {
+      if (!references.has(document.documentNumber)) continue
+      related.push({
+        id: document.id,
+        number: document.documentNumber,
+        type: documentTypeLabel(document.documentType),
+        party: contactName(document.contactId),
+        date: document.documentDate,
+        status: document.status,
+        amount: document.totalAmount,
+      })
+    }
+
+    return related
+  }, [contactName, drillEntries, drillTarget, invoices, paymentVouchers, receipts, vendorBills, workflowDocuments])
+
+  function openAccountPeriod(line: ReportLine, sectionLabel: string) {
+    setDrillTarget({
+      title: `${line.code} ${line.name}`.trim(),
+      subtitle: `${sectionLabel} from ${formatDate(periodStart)} to ${formatDate(periodEnd)}`,
+      mode: "account-period",
+      accountId: line.accountId,
+    })
+  }
+
+  function openAccountAsOf(accountId: string, code: string, name: string, label: string) {
+    setDrillTarget({
+      title: `${code} ${name}`.trim(),
+      subtitle: `${label} as of ${formatDate(periodEnd)}`,
+      mode: "account-as-of",
+      accountId,
+    })
+  }
+
+  function openCashFlowLine(line: ReportLine, sectionLabel: string) {
+    setDrillTarget({
+      title: line.name,
+      subtitle: `${sectionLabel} from ${formatDate(periodStart)} to ${formatDate(periodEnd)}`,
+      mode: "cash-flow-line",
+      cashFlowLabel: line.name,
+    })
+  }
 
   function openNewAsset() {
     setEditingAssetId(null)
@@ -399,7 +606,19 @@ export function ReportsView() {
                     <TableCell className="text-right font-semibold"><Amount value={section.credit} /></TableCell>
                   </TableRow>,
                   ...section.rows.map((row) => (
-                    <TableRow key={row.accountId}>
+                    <TableRow
+                      key={row.accountId}
+                      role="button"
+                      tabIndex={0}
+                      className="cursor-pointer"
+                      onClick={() => openAccountAsOf(row.accountId, row.code, row.name, "Trial balance")}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault()
+                          openAccountAsOf(row.accountId, row.code, row.name, "Trial balance")
+                        }
+                      }}
+                    >
                       <TableCell className="pl-6"><span className="font-mono text-xs text-muted-foreground">{row.code}</span> {row.name}</TableCell>
                       <TableCell className="capitalize">{row.type}</TableCell>
                       <TableCell className="text-right"><Amount value={row.debit} /></TableCell>
@@ -427,7 +646,38 @@ export function ReportsView() {
           <Card className="overflow-hidden py-0">
             <Table>
               <TableHeader><TableRow><TableHead>Date</TableHead><TableHead>Account</TableHead><TableHead>Description</TableHead><TableHead className="text-right">Debit</TableHead><TableHead className="text-right">Credit</TableHead><TableHead className="text-right">Running</TableHead></TableRow></TableHeader>
-              <TableBody>{generalLedger.map((line, index) => <TableRow key={`${line.accountId}-${line.date}-${index}`}><TableCell>{formatDate(line.date)}</TableCell><TableCell>{line.accountName}</TableCell><TableCell>{line.description}</TableCell><TableCell className="text-right"><Amount value={line.debit} /></TableCell><TableCell className="text-right"><Amount value={line.credit} /></TableCell><TableCell className="text-right"><Amount value={line.runningBalance} colorBySign /></TableCell></TableRow>)}</TableBody>
+              <TableBody>{generalLedger.map((line, index) => (
+                <TableRow
+                  key={`${line.accountId}-${line.journalEntryId}-${index}`}
+                  role="button"
+                  tabIndex={0}
+                  className="cursor-pointer"
+                  onClick={() => setDrillTarget({
+                    title: line.reference ?? line.description,
+                    subtitle: `General ledger entry on ${formatDate(line.date)}`,
+                    mode: "ledger-entry",
+                    journalEntryId: line.journalEntryId,
+                  })}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault()
+                      setDrillTarget({
+                        title: line.reference ?? line.description,
+                        subtitle: `General ledger entry on ${formatDate(line.date)}`,
+                        mode: "ledger-entry",
+                        journalEntryId: line.journalEntryId,
+                      })
+                    }
+                  }}
+                >
+                  <TableCell>{formatDate(line.date)}</TableCell>
+                  <TableCell>{line.accountName}</TableCell>
+                  <TableCell>{line.description}</TableCell>
+                  <TableCell className="text-right"><Amount value={line.debit} /></TableCell>
+                  <TableCell className="text-right"><Amount value={line.credit} /></TableCell>
+                  <TableCell className="text-right"><Amount value={line.runningBalance} colorBySign /></TableCell>
+                </TableRow>
+              ))}</TableBody>
             </Table>
           </Card>
         </TabsContent>
@@ -435,8 +685,8 @@ export function ReportsView() {
         <TabsContent value="profit" className="space-y-3">
           <div className="flex justify-end"><ExportButton label="Export Profit or Loss" onClick={exportProfitOrLoss} /></div>
           <div className="grid gap-3 lg:grid-cols-2">
-            <Card className="overflow-hidden py-0"><SectionTable section={profit.revenue} /></Card>
-            <Card className="overflow-hidden py-0"><SectionTable section={profit.expenses} /></Card>
+            <Card className="overflow-hidden py-0"><SectionTable section={profit.revenue} onLineClick={(line) => openAccountPeriod(line, profit.revenue.label)} /></Card>
+            <Card className="overflow-hidden py-0"><SectionTable section={profit.expenses} onLineClick={(line) => openAccountPeriod(line, profit.expenses.label)} /></Card>
             <Card className="lg:col-span-2"><CardContent className="flex flex-wrap items-center justify-between gap-3 p-4"><span className="font-semibold">Net Profit / Loss</span><Amount value={profit.netProfitLoss} colorBySign className="text-lg font-semibold" /></CardContent></Card>
           </div>
         </TabsContent>
@@ -444,18 +694,18 @@ export function ReportsView() {
         <TabsContent value="position" className="space-y-3">
           <div className="flex justify-end"><ExportButton label="Export Position" onClick={exportFinancialPosition} /></div>
           <div className="grid gap-3 lg:grid-cols-3">
-            <Card className="overflow-hidden py-0"><SectionTable section={position.assets} /></Card>
-            <Card className="overflow-hidden py-0"><SectionTable section={position.liabilities} /></Card>
-            <Card className="overflow-hidden py-0"><SectionTable section={position.equity} /></Card>
+            <Card className="overflow-hidden py-0"><SectionTable section={position.assets} onLineClick={(line) => line.accountId !== "current-profit" && openAccountAsOf(line.accountId, line.code, line.name, position.assets.label)} /></Card>
+            <Card className="overflow-hidden py-0"><SectionTable section={position.liabilities} onLineClick={(line) => openAccountAsOf(line.accountId, line.code, line.name, position.liabilities.label)} /></Card>
+            <Card className="overflow-hidden py-0"><SectionTable section={position.equity} onLineClick={(line) => line.accountId !== "current-profit" && openAccountAsOf(line.accountId, line.code, line.name, position.equity.label)} /></Card>
           </div>
         </TabsContent>
 
         <TabsContent value="cash" className="space-y-3">
           <div className="flex justify-end"><ExportButton label="Export Cash Flows" onClick={exportCashFlow} /></div>
           <div className="grid gap-3 lg:grid-cols-3">
-            <Card className="overflow-hidden py-0"><SectionTable section={cashFlow.operatingActivities} /></Card>
-            <Card className="overflow-hidden py-0"><SectionTable section={cashFlow.investingActivities} /></Card>
-            <Card className="overflow-hidden py-0"><SectionTable section={cashFlow.financingActivities} /></Card>
+            <Card className="overflow-hidden py-0"><SectionTable section={cashFlow.operatingActivities} onLineClick={(line) => openCashFlowLine(line, cashFlow.operatingActivities.label)} /></Card>
+            <Card className="overflow-hidden py-0"><SectionTable section={cashFlow.investingActivities} onLineClick={(line) => openCashFlowLine(line, cashFlow.investingActivities.label)} /></Card>
+            <Card className="overflow-hidden py-0"><SectionTable section={cashFlow.financingActivities} onLineClick={(line) => openCashFlowLine(line, cashFlow.financingActivities.label)} /></Card>
             <Card className="lg:col-span-3"><CardContent className="grid gap-3 p-4 md:grid-cols-3"><div><p className="text-xs text-muted-foreground">Opening Cash</p><Amount value={cashFlow.openingCash} className="font-semibold" /></div><div><p className="text-xs text-muted-foreground">Net Movement</p><Amount value={cashFlow.netCashMovement} colorBySign className="font-semibold" /></div><div><p className="text-xs text-muted-foreground">Closing Cash</p><Amount value={cashFlow.closingCash} className="font-semibold" /></div></CardContent></Card>
           </div>
         </TabsContent>
@@ -509,6 +759,130 @@ export function ReportsView() {
           </div>
         </TabsContent>
       </Tabs>
+
+      <Dialog open={drillTarget !== null} onOpenChange={(open) => { if (!open) setDrillTarget(null) }}>
+        {drillTarget ? (
+          <DialogContent className="sm:max-w-5xl">
+            <DialogHeader>
+              <DialogTitle>{drillTarget.title}</DialogTitle>
+              <DialogDescription>{drillTarget.subtitle}</DialogDescription>
+            </DialogHeader>
+
+            <div className="grid gap-3 sm:grid-cols-3">
+              <div className="rounded-lg border border-border p-3">
+                <p className="text-xs text-muted-foreground">Journal Entries</p>
+                <p className="mt-1 text-xl font-semibold">{drillEntries.length}</p>
+              </div>
+              <div className="rounded-lg border border-border p-3">
+                <p className="text-xs text-muted-foreground">Debits</p>
+                <Amount
+                  value={drillEntries.reduce((sum, entry) => sum + entry.lines.reduce((lineSum, line) => lineSum + line.debit, 0), 0)}
+                  className="mt-1 font-semibold"
+                />
+              </div>
+              <div className="rounded-lg border border-border p-3">
+                <p className="text-xs text-muted-foreground">Credits</p>
+                <Amount
+                  value={drillEntries.reduce((sum, entry) => sum + entry.lines.reduce((lineSum, line) => lineSum + line.credit, 0), 0)}
+                  className="mt-1 font-semibold"
+                />
+              </div>
+            </div>
+
+            <section className="space-y-2">
+              <h3 className="text-sm font-semibold">Contributing Journal Entries</h3>
+              <Card>
+                <CardContent className="p-0">
+                  {drillEntries.length === 0 ? (
+                    <div className="p-4 text-sm text-muted-foreground">No posted journal entries matched this report line.</div>
+                  ) : (
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Date</TableHead>
+                          <TableHead>Reference</TableHead>
+                          <TableHead>Description</TableHead>
+                          <TableHead>Lines</TableHead>
+                          <TableHead className="text-right">Debit</TableHead>
+                          <TableHead className="text-right">Credit</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {drillEntries.map((entry) => (
+                          <TableRow key={entry.id}>
+                            <TableCell>{formatDate(entry.date)}</TableCell>
+                            <TableCell className="font-mono text-sm">{entry.reference ?? "-"}</TableCell>
+                            <TableCell className="font-medium">{entry.description}</TableCell>
+                            <TableCell>
+                              <div className="max-w-md space-y-1">
+                                {entry.lines.map((line, index) => {
+                                  const account = accountById.get(line.accountId)
+                                  return (
+                                    <p key={`${entry.id}-${line.accountId}-${index}`} className="truncate text-xs text-muted-foreground">
+                                      <span className="font-mono">{account?.code ?? line.accountId}</span>
+                                      {" "}
+                                      {account?.name ?? line.accountId}
+                                      {" "}
+                                      Dr <Amount value={line.debit} muted={line.debit === 0} />
+                                      {" / "}
+                                      Cr <Amount value={line.credit} muted={line.credit === 0} />
+                                    </p>
+                                  )
+                                })}
+                              </div>
+                            </TableCell>
+                            <TableCell className="text-right"><Amount value={entry.lines.reduce((sum, line) => sum + line.debit, 0)} /></TableCell>
+                            <TableCell className="text-right"><Amount value={entry.lines.reduce((sum, line) => sum + line.credit, 0)} /></TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  )}
+                </CardContent>
+              </Card>
+            </section>
+
+            <section className="space-y-2">
+              <h3 className="text-sm font-semibold">Related Documents</h3>
+              <Card>
+                <CardContent className="p-0">
+                  {relatedDocuments.length === 0 ? (
+                    <div className="flex items-center gap-2 p-4 text-sm text-muted-foreground">
+                      <FileText className="size-4" />
+                      No invoice, bill, receipt, payment voucher, or workflow document matched these entries.
+                    </div>
+                  ) : (
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Type</TableHead>
+                          <TableHead>No.</TableHead>
+                          <TableHead>Party</TableHead>
+                          <TableHead>Date</TableHead>
+                          <TableHead>Status</TableHead>
+                          <TableHead className="text-right">Amount</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {relatedDocuments.map((document) => (
+                          <TableRow key={`${document.type}-${document.id}`}>
+                            <TableCell>{document.type}</TableCell>
+                            <TableCell className="font-mono text-sm">{document.number}</TableCell>
+                            <TableCell className="font-medium">{document.party ?? "-"}</TableCell>
+                            <TableCell>{formatDate(document.date)}</TableCell>
+                            <TableCell><Badge variant={document.status === "posted" || document.status === "paid" ? "secondary" : "outline"}>{titleCase(document.status)}</Badge></TableCell>
+                            <TableCell className="text-right"><Amount value={document.amount} /></TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  )}
+                </CardContent>
+              </Card>
+            </section>
+          </DialogContent>
+        ) : null}
+      </Dialog>
 
       <Dialog open={assetOpen} onOpenChange={setAssetOpen}>
         <DialogContent className="sm:max-w-2xl">
