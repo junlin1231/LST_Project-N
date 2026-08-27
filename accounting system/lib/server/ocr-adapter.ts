@@ -9,6 +9,7 @@ import zlib from "node:zlib"
 import type { NormalizedDocumentFields } from "@/lib/accounting/document-types"
 import { chatCompletionsUrl, fetchAiJson } from "./ai-endpoint"
 import { getServerEnv } from "./env"
+import type { ReceiptRegion } from "./receipt-splitter"
 
 const execFileAsync = promisify(execFile)
 
@@ -26,6 +27,11 @@ export interface OcrAdapter {
     mimeType: string
     originalFilename: string
   }): Promise<OcrResult>
+  detectReceiptRegions(input: {
+    filePath: string
+    mimeType: string
+    originalFilename: string
+  }): Promise<ReceiptRegion[]>
 }
 
 function today() {
@@ -184,6 +190,77 @@ function extractJsonObject(text: string): Record<string, unknown> | null {
   }
 }
 
+function normalizedNumber(value: unknown) {
+  const number = typeof value === "number" ? value : Number.parseFloat(String(value ?? ""))
+  return Number.isFinite(number) ? number : NaN
+}
+
+function normalizeReceiptRegions(value: unknown): ReceiptRegion[] {
+  if (!Array.isArray(value)) return []
+  const regions = value.flatMap((item) => {
+    if (!item || typeof item !== "object") return []
+    const region = item as Record<string, unknown>
+    const x = normalizedNumber(region.x)
+    const y = normalizedNumber(region.y)
+    const width = normalizedNumber(region.width)
+    const height = normalizedNumber(region.height)
+    if (![x, y, width, height].every(Number.isFinite)) return []
+    // The detection prompt uses normalized coordinates. A region must be large enough to be a receipt.
+    if (x < 0 || y < 0 || width < 0.08 || height < 0.08 || x + width > 1.001 || y + height > 1.001) return []
+    return [{ x, y, width, height }]
+  })
+  return regions
+    .sort((a, b) => a.y - b.y || a.x - b.x)
+    .filter((region, index, all) => !all.slice(0, index).some((other) => {
+      const overlapWidth = Math.max(0, Math.min(other.x + other.width, region.x + region.width) - Math.max(other.x, region.x))
+      const overlapHeight = Math.max(0, Math.min(other.y + other.height, region.y + region.height) - Math.max(other.y, region.y))
+      const overlap = overlapWidth * overlapHeight
+      return overlap / Math.min(other.width * other.height, region.width * region.height) > 0.9
+    }))
+    .slice(0, 10)
+}
+
+async function detectReceiptRegionsWithGemma(input: { filePath: string; mimeType: string; originalFilename: string }): Promise<ReceiptRegion[]> {
+  const env = getServerEnv()
+  if (!env.aiBaseUrl || !input.mimeType.startsWith("image/")) return []
+  if (env.aiProvider !== "openai") throw new Error(`Unsupported LLM_PROVIDER for receipt detection: ${env.aiProvider}.`)
+
+  const bytes = await fs.readFile(input.filePath)
+  const headers: Record<string, string> = { "Content-Type": "application/json" }
+  if (env.aiApiKey) headers.Authorization = `Bearer ${env.aiApiKey}`
+  const payload = await fetchAiJson(chatCompletionsUrl(env.aiBaseUrl), {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      model: env.aiModel,
+      temperature: 0,
+      messages: [
+        {
+          role: "system",
+          content: [
+            "You detect separate, physically distinct receipts in a single image.",
+            "Return only JSON: {\"receipts\":[{\"x\":0,\"y\":0,\"width\":0,\"height\":0}]}",
+            "Coordinates must be normalized fractions from 0 to 1 of the whole image.",
+            "Include a region only when it is a complete separate receipt, invoice, or payment slip. Do not split one long receipt into sections.",
+            "Return exactly one region or an empty receipts array when there are not at least two separate receipts.",
+            "Keep a small margin around every receipt and do not return overlapping regions.",
+          ].join("\n"),
+        },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: `Find separately scannable receipts in ${input.originalFilename}.` },
+            { type: "image_url", image_url: { url: `data:${input.mimeType};base64,${bytes.toString("base64")}`, detail: "high" } },
+          ],
+        },
+      ],
+    }),
+  }, 120_000) as { choices?: Array<{ message?: { content?: string } }> }
+  const json = extractJsonObject(payload.choices?.[0]?.message?.content ?? "")
+  const regions = normalizeReceiptRegions(json?.receipts)
+  return regions.length > 1 ? regions : []
+}
+
 function numberValue(value: unknown, fallback = 0) {
   const number = typeof value === "number" ? value : Number.parseFloat(String(value ?? ""))
   return Number.isFinite(number) ? number : fallback
@@ -320,6 +397,16 @@ async function extractWithGemmaEndpoint(input: { filePath: string; mimeType: str
 }
 
 export class MockOcrAdapter implements OcrAdapter {
+  async detectReceiptRegions(input: { filePath: string; mimeType: string; originalFilename: string }) {
+    try {
+      return await detectReceiptRegionsWithGemma(input)
+    } catch (error) {
+      // Detection must never prevent ordinary OCR when the vision endpoint is unavailable.
+      console.error("Receipt split detection failed:", error)
+      return []
+    }
+  }
+
   async extract(input: { filePath: string; mimeType: string; originalFilename: string }): Promise<OcrResult> {
     const env = getServerEnv()
     let aiWarning = !env.aiBaseUrl

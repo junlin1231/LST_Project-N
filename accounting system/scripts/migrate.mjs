@@ -4,7 +4,23 @@ import pg from "pg"
 
 const { Pool } = pg
 
-const databaseUrl = process.env.DATABASE_URL
+async function databaseUrlFromEnvFile() {
+  try {
+    const content = await fs.readFile(path.join(process.cwd(), ".env"), "utf8")
+    for (const line of content.split(/\r?\n/)) {
+      const trimmed = line.trim()
+      if (!trimmed || trimmed.startsWith("#")) continue
+      const separator = trimmed.indexOf("=")
+      if (separator <= 0 || trimmed.slice(0, separator).trim() !== "DATABASE_URL") continue
+      return trimmed.slice(separator + 1).trim().replace(/^['"]|['"]$/g, "")
+    }
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error
+  }
+  return undefined
+}
+
+const databaseUrl = process.env.DATABASE_URL ?? await databaseUrlFromEnvFile()
 
 if (!databaseUrl) {
   console.error("DATABASE_URL is required.")

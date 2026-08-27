@@ -19,6 +19,8 @@ services:
     build:
       context: .
       target: deps
+    # /app/node_modules is a Docker volume, so refresh it from pnpm-lock.yaml before starting Next.
+    command: sh -c "CI=true pnpm install --frozen-lockfile && pnpm dev --hostname 0.0.0.0"
     command: pnpm dev --hostname 0.0.0.0
     env_file:
       - .env.local
@@ -27,11 +29,13 @@ services:
       NEXT_TELEMETRY_DISABLED: '1'
       DATABASE_URL: postgresql://accounting:accounting@db:5432/accounting
       AUTO_MIGRATE: '1'
+      DOCUMENT_STORAGE_ROOT: /app/data/scanned_docs
       OCR_STORAGE_DIR: /app/ocr/scanned_docs
     volumes:
       - .:/app
       - /app/node_modules
       - /app/.next
+      - document_data:/app/data
       - ../ocr/scanned_docs:/app/ocr/scanned_docs
     ports:
       - '3000:3000'
@@ -41,3 +45,4 @@ services:
 
 volumes:
   postgres_data:
+  document_data:
