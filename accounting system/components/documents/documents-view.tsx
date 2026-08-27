@@ -16,6 +16,12 @@ import { cn } from "@/lib/utils"
 
 type Notice = { type: "error" | "success"; message: string } | null
 type PostingTemplate = "expense_paid" | "vendor_bill" | "money_received" | "manual"
+type DocumentActionResponse = OcrDocumentDetail | {
+  detail: OcrDocumentDetail
+  journalEntry?: { id: string }
+  splitDocuments?: OcrDocumentDetail[]
+  skippedPostedDocumentCount?: number
+}
 
 const DEFAULT_TAX_RATE = 0.06
 
@@ -210,7 +216,10 @@ export function DocumentsView() {
     const targetId = selected.id
     const targetFilename = selected.originalFilename
     if (isOcrProcess && selected.extraction) {
-      const confirmed = window.confirm(`Re-scan ${selected.originalFilename}? This will create a fresh OCR draft from the same stored file.`)
+      const rescanDescription = selected.childDocumentCount
+        ? `This will re-scan its ${selected.childDocumentCount} separated receipt files.`
+        : "This will create a fresh OCR draft from the same stored file."
+      const confirmed = window.confirm(`Re-scan ${selected.originalFilename}? ${rescanDescription}`)
       if (!confirmed) return
     }
     setBusy(true)
@@ -223,16 +232,25 @@ export function DocumentsView() {
     setNotice(null)
     try {
       const response = await fetch(`/api/documents/${targetId}/${path}`, options ?? { method: "POST" })
-      const body = await readJson<{ detail?: OcrDocumentDetail; journalEntry?: { id: string } } | OcrDocumentDetail>(response)
+      const body = await readJson<DocumentActionResponse>(response)
       const detail = "detail" in body && body.detail ? body.detail : body as OcrDocumentDetail
+      const splitDocuments = "splitDocuments" in body ? body.splitDocuments : undefined
+      const skippedPostedDocumentCount = "skippedPostedDocumentCount" in body ? body.skippedPostedDocumentCount ?? 0 : 0
+      const displayedDetail = splitDocuments?.[0] ?? detail
       if (isOcrProcess) setScanProgress(100)
       if (selectedIdRef.current === targetId) {
-        setSelected(detail)
-        await loadDocuments(detail.id)
+        selectedIdRef.current = displayedDetail.id
+        setSelected(displayedDetail)
+        await loadDocuments(displayedDetail.id)
       } else {
         await loadDocuments(selectedIdRef.current)
       }
-      setNotice({ type: "success", message: path === "post" ? `Posted journal entry ${"journalEntry" in body ? body.journalEntry?.id ?? "" : ""}`.trim() : "Document updated." })
+      const message = splitDocuments?.length
+        ? `${splitDocuments.length} receipts detected, separated, and scanned.${skippedPostedDocumentCount ? ` ${skippedPostedDocumentCount} posted receipt${skippedPostedDocumentCount === 1 ? " was" : "s were"} left unchanged.` : ""} Showing receipt 1.`
+        : path === "post"
+          ? `Posted journal entry ${"journalEntry" in body ? body.journalEntry?.id ?? "" : ""}`.trim()
+          : "Document updated."
+      setNotice({ type: "success", message })
     } catch (error) {
       setNotice({ type: "error", message: error instanceof Error ? error.message : "Action failed." })
     } finally {
@@ -445,7 +463,9 @@ export function DocumentsView() {
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="truncate text-sm font-medium">{document.originalFilename}</p>
-          <p className="mt-1 text-xs text-muted-foreground">{document.sourceChannel === "camera_capture" ? "Photo capture" : "File upload"}</p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {document.receiptIndex ? `Receipt ${document.receiptIndex} from a split upload` : document.childDocumentCount ? `Original upload · split into ${document.childDocumentCount} receipts` : document.sourceChannel === "camera_capture" ? "Photo capture" : "File upload"}
+          </p>
         </div>
         <Badge variant={statusVariant(document.processingStatus)}>{titleCase(document.processingStatus)}</Badge>
       </div>
@@ -500,10 +520,12 @@ export function DocumentsView() {
                       <Badge variant={statusVariant(selected.processingStatus)}>{titleCase(selected.processingStatus)}</Badge>
                       <Badge variant="outline">{selected.categoryResult ? titleCase(selected.categoryResult.category) : "Not categorized"}</Badge>
                       {selected.categoryResult ? <Badge variant="outline">{Math.round(selected.categoryResult.confidence * 100)}% confidence</Badge> : null}
+                      {selected.receiptIndex ? <Badge variant="outline">Split receipt {selected.receiptIndex}</Badge> : null}
+                      {selected.childDocumentCount ? <Badge variant="outline">{selected.childDocumentCount} split receipts</Badge> : null}
                     </div>
                   </div>
                   <div className="flex flex-wrap gap-2">
-                    <Button variant="outline" onClick={() => void action("process")} disabled={busy}>
+                    <Button variant="outline" onClick={() => void action("process")} disabled={busy || selected.processingStatus === "posted" || selected.reviewStatus === "posted"}>
                       {isSelectedScanning ? <LoaderCircle className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
                       {isSelectedScanning ? "Scanning" : isScanning ? "Scan running" : selected.extraction ? "Re-scan" : "OCR"}
                     </Button>

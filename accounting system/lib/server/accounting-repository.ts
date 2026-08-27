@@ -19,6 +19,7 @@ import {
   demoWorkflowDocuments,
 } from "@/lib/accounting/data"
 import { isJournalEntryBalanced } from "@/lib/accounting/calculations"
+import { documentStorageRoot } from "./document-storage"
 import {
   ADJUST_CONFIRMATION_PHRASE,
   POST_CONFIRMATION_PHRASE,
@@ -815,7 +816,7 @@ export async function loadDemoData() {
 export async function resetSystemData() {
   await ensureDatabaseReady()
   await ensureDemoCompany()
-  const ocrStorageDir = path.resolve(process.cwd(), "..", "ocr", "scanned_docs", DEFAULT_COMPANY_ID)
+  const ocrStorageDir = path.join(documentStorageRoot(), DEFAULT_COMPANY_ID)
   await transaction(async (client) => {
     await exec(client, "DELETE FROM posting_confirmations WHERE company_id = $1", [DEFAULT_COMPANY_ID])
     await exec(client, "DELETE FROM document_accounting_drafts WHERE company_id = $1", [DEFAULT_COMPANY_ID])

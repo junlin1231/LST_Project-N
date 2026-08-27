@@ -23,6 +23,8 @@ import { DEFAULT_COMPANY_ID, DEFAULT_USER_ID, insertJournalEntry } from "./accou
 import { ensureDatabaseReady, query, transaction, type DbExecutor } from "./db"
 import { categorizationAdapter } from "./categorization-adapter"
 import { ocrAdapter } from "./ocr-adapter"
+import { splitImageIntoReceipts } from "./receipt-splitter"
+import { documentStorageRoot } from "./document-storage"
 
 const MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024
 const ALLOWED_MIME_TYPES = new Set([
@@ -42,6 +44,9 @@ interface DocumentRow {
   mime_type: string
   file_size_bytes: string
   sha256_hash: string
+  parent_document_id: string | null
+  receipt_index: number | null
+  child_document_count: string
   processing_status: DocumentProcessingStatus
   review_status: PostingConfirmationStatus
   source_channel: DocumentSourceChannel
@@ -90,10 +95,6 @@ interface ConfirmationRow {
   created_at: string
 }
 
-function storageRoot() {
-  return path.resolve(process.cwd(), "..", "ocr", "scanned_docs")
-}
-
 function safeFilename(filename: string) {
   const ext = path.extname(filename).toLowerCase()
   const base = path.basename(filename, ext).replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "")
@@ -119,6 +120,9 @@ function mapDocument(row: DocumentRow): OcrDocument {
     originalFilename: row.original_filename,
     mimeType: row.mime_type,
     fileSizeBytes: Number(row.file_size_bytes),
+    parentDocumentId: row.parent_document_id ?? undefined,
+    receiptIndex: row.receipt_index ?? undefined,
+    childDocumentCount: Number(row.child_document_count ?? 0),
     processingStatus: row.processing_status,
     reviewStatus: row.review_status,
     sourceChannel: row.source_channel,
@@ -217,6 +221,8 @@ export async function createDocumentUpload(input: {
   mimeType: string
   bytes: Buffer
   sourceChannel: DocumentSourceChannel
+  parentDocumentId?: string
+  receiptIndex?: number
 }) {
   await ensureDemoCompany()
   assertSourceChannel(input.sourceChannel)
@@ -224,7 +230,7 @@ export async function createDocumentUpload(input: {
 
   const hash = createHash("sha256").update(input.bytes).digest("hex")
   const duplicate = await query<DocumentRow>(
-    `SELECT id, original_filename, storage_path, mime_type, file_size_bytes::text, sha256_hash, processing_status, review_status, source_channel, uploaded_at, updated_at
+    `SELECT id, original_filename, storage_path, mime_type, file_size_bytes::text, sha256_hash, parent_document_id, receipt_index, '0'::text AS child_document_count, processing_status, review_status, source_channel, uploaded_at, updated_at
      FROM documents
      WHERE company_id = $1 AND sha256_hash = $2`,
     [DEFAULT_COMPANY_ID, hash],
@@ -232,7 +238,7 @@ export async function createDocumentUpload(input: {
   if (duplicate.rows[0]) return getDocumentDetail(duplicate.rows[0].id)
 
   const id = `doc-${randomUUID()}`
-  const companyDir = path.join(storageRoot(), DEFAULT_COMPANY_ID)
+  const companyDir = path.join(documentStorageRoot(), DEFAULT_COMPANY_ID)
   await fs.mkdir(companyDir, { recursive: true })
   const filename = `${id}-${safeFilename(input.filename)}`
   const storagePath = path.join(companyDir, filename)
@@ -241,9 +247,9 @@ export async function createDocumentUpload(input: {
   await query(
     `INSERT INTO documents (
       id, company_id, uploaded_by, original_filename, storage_path, mime_type, file_size_bytes, sha256_hash,
-      processing_status, review_status, source_channel
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'stored', 'pending', $9)`,
-    [id, DEFAULT_COMPANY_ID, DEFAULT_USER_ID, input.filename, storagePath, input.mimeType, input.bytes.byteLength, hash, input.sourceChannel],
+      processing_status, review_status, source_channel, parent_document_id, receipt_index
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'stored', 'pending', $9, $10, $11)`,
+    [id, DEFAULT_COMPANY_ID, DEFAULT_USER_ID, input.filename, storagePath, input.mimeType, input.bytes.byteLength, hash, input.sourceChannel, input.parentDocumentId ?? null, input.receiptIndex ?? null],
   )
 
   return getDocumentDetail(id)
@@ -252,10 +258,17 @@ export async function createDocumentUpload(input: {
 export async function listDocuments(): Promise<OcrDocument[]> {
   await ensureDemoCompany()
   const result = await query<DocumentRow>(
-    `SELECT id, original_filename, storage_path, mime_type, file_size_bytes::text, sha256_hash, processing_status, review_status, source_channel, uploaded_at, updated_at
-     FROM documents
-     WHERE company_id = $1
-     ORDER BY uploaded_at DESC`,
+    `SELECT d.id, d.original_filename, d.storage_path, d.mime_type, d.file_size_bytes::text, d.sha256_hash, d.parent_document_id, d.receipt_index,
+       (SELECT COUNT(*)::text FROM documents child WHERE child.company_id = d.company_id AND child.parent_document_id = d.id) AS child_document_count,
+       d.processing_status, d.review_status, d.source_channel, d.uploaded_at, d.updated_at
+     FROM documents d
+     WHERE d.company_id = $1
+       -- Keep split-source uploads for audit and rescans, but show only their receipt children in the working list.
+       AND (d.parent_document_id IS NOT NULL OR NOT EXISTS (
+         SELECT 1 FROM documents child
+         WHERE child.company_id = d.company_id AND child.parent_document_id = d.id
+       ))
+     ORDER BY d.uploaded_at DESC`,
     [DEFAULT_COMPANY_ID],
   )
   return result.rows.map(mapDocument)
@@ -263,9 +276,11 @@ export async function listDocuments(): Promise<OcrDocument[]> {
 
 async function getDocumentRow(id: string) {
   const result = await query<DocumentRow>(
-    `SELECT id, original_filename, storage_path, mime_type, file_size_bytes::text, sha256_hash, processing_status, review_status, source_channel, uploaded_at, updated_at
-     FROM documents
-     WHERE company_id = $1 AND id = $2`,
+    `SELECT d.id, d.original_filename, d.storage_path, d.mime_type, d.file_size_bytes::text, d.sha256_hash, d.parent_document_id, d.receipt_index,
+       (SELECT COUNT(*)::text FROM documents child WHERE child.company_id = d.company_id AND child.parent_document_id = d.id) AS child_document_count,
+       d.processing_status, d.review_status, d.source_channel, d.uploaded_at, d.updated_at
+     FROM documents d
+     WHERE d.company_id = $1 AND d.id = $2`,
     [DEFAULT_COMPANY_ID, id],
   )
   return result.rows[0]
@@ -311,7 +326,7 @@ export async function getDocumentFile(id: string) {
   await ensureDemoCompany()
   const row = await getDocumentRow(id)
   if (!row) throw new Error("Document was not found.")
-  const root = storageRoot()
+  const root = documentStorageRoot()
   const resolved = path.resolve(row.storage_path)
   if (!resolved.startsWith(root)) throw new Error("Document storage path is invalid.")
   return {
@@ -341,7 +356,7 @@ export async function deleteUnpostedDocument(id: string) {
   )
   if (postedDraft.rows[0]) throw new Error("Documents with posted journal entries cannot be deleted.")
 
-  const root = storageRoot()
+  const root = documentStorageRoot()
   const resolved = path.resolve(row.storage_path)
   if (!resolved.startsWith(root)) throw new Error("Document storage path is invalid.")
 
@@ -369,11 +384,9 @@ function needsReview(ocrConfidence: number | undefined, categoryConfidence: numb
   return Array.from(new Set(warnings))
 }
 
-export async function processDocument(id: string) {
-  await ensureDemoCompany()
+async function processOneDocument(id: string) {
   const row = await getDocumentRow(id)
   if (!row) throw new Error("Document was not found.")
-
   try {
     await query("UPDATE documents SET processing_status = 'ocr_processing', updated_at = NOW() WHERE id = $1 AND company_id = $2", [id, DEFAULT_COMPANY_ID])
     const ocr = await ocrAdapter.extract({ filePath: row.storage_path, mimeType: row.mime_type, originalFilename: row.original_filename })
@@ -424,6 +437,92 @@ export async function processDocument(id: string) {
   }
 
   return getDocumentDetail(id)
+}
+
+interface ChildDocumentRow {
+  id: string
+  processing_status: DocumentProcessingStatus
+  review_status: PostingConfirmationStatus
+}
+
+async function childDocumentRows(parentDocumentId: string) {
+  const result = await query<ChildDocumentRow>(
+    `SELECT id, processing_status, review_status
+     FROM documents
+     WHERE company_id = $1 AND parent_document_id = $2
+     ORDER BY receipt_index ASC, uploaded_at ASC`,
+    [DEFAULT_COMPANY_ID, parentDocumentId],
+  )
+  return result.rows
+}
+
+async function recordSplitParent(id: string, receiptCount: number) {
+  await transaction(async (client) => {
+    await updateDocumentStatus(client, id, "needs_review", "pending")
+    await exec(
+      client,
+      `INSERT INTO document_extractions (id, company_id, document_id, raw_text, extracted_fields, ocr_engine, status)
+       VALUES ($1, $2, $3, $4, $5::jsonb, 'receipt-region-detector', 'completed')`,
+      [
+        `ocr-${randomUUID()}`,
+        DEFAULT_COMPANY_ID,
+        id,
+        `Multiple receipts detected. ${receiptCount} separate receipt documents were created and scanned.`,
+        JSON.stringify({ receiptCount, splitIntoSeparateDocuments: true }),
+      ],
+    )
+  })
+}
+
+export interface DocumentProcessResult {
+  detail: OcrDocumentDetail
+  splitDocuments?: OcrDocumentDetail[]
+  skippedPostedDocumentCount?: number
+}
+
+export async function processDocument(id: string): Promise<DocumentProcessResult> {
+  await ensureDemoCompany()
+  const row = await getDocumentRow(id)
+  if (!row) throw new Error("Document was not found.")
+  if (row.processing_status === "posted" || row.review_status === "posted") {
+    throw new Error("Posted documents cannot be rescanned.")
+  }
+
+  // Child documents are already cropped. Re-scanning one must never create another generation of children.
+  if (row.parent_document_id || !row.mime_type.startsWith("image/")) {
+    return { detail: await processOneDocument(id) }
+  }
+
+  let children = await childDocumentRows(id)
+  if (children.length === 0) {
+    const regions = await ocrAdapter.detectReceiptRegions({
+      filePath: row.storage_path,
+      mimeType: row.mime_type,
+      originalFilename: row.original_filename,
+    })
+    if (regions.length < 2) return { detail: await processOneDocument(id) }
+
+    await query("UPDATE documents SET processing_status = 'ocr_processing', updated_at = NOW() WHERE id = $1 AND company_id = $2", [id, DEFAULT_COMPANY_ID])
+    const crops = await splitImageIntoReceipts({ filePath: row.storage_path, regions })
+    const baseName = path.basename(row.original_filename, path.extname(row.original_filename)) || "receipt"
+    await Promise.all(crops.map((bytes, index) => createDocumentUpload({
+      filename: `${baseName}-receipt-${String(index + 1).padStart(2, "0")}.jpg`,
+      mimeType: "image/jpeg",
+      bytes,
+      sourceChannel: row.source_channel,
+      parentDocumentId: id,
+      receiptIndex: index + 1,
+    })))
+    children = await childDocumentRows(id)
+  }
+
+  // A parent rescan reuses its existing cropped files and creates fresh OCR drafts for each receipt.
+  const childrenToRescan = children.filter((child) => child.processing_status !== "posted" && child.review_status !== "posted")
+  const skippedPostedDocumentCount = children.length - childrenToRescan.length
+  await Promise.allSettled(childrenToRescan.map((child) => processOneDocument(child.id)))
+  await recordSplitParent(id, children.length)
+  const splitDocuments = await Promise.all(children.map((child) => getDocumentDetail(child.id)))
+  return { detail: await getDocumentDetail(id), splitDocuments, skippedPostedDocumentCount }
 }
 
 function validateCategory(value: unknown): DocumentCategory {

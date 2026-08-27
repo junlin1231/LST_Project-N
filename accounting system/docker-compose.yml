@@ -2,13 +2,11 @@ services:
   db:
     image: postgres:17-alpine
     environment:
-      POSTGRES_DB: accounting
-      POSTGRES_USER: accounting
-      POSTGRES_PASSWORD: accounting
+      POSTGRES_DB: ${POSTGRES_DB:-accounting}
+      POSTGRES_USER: ${POSTGRES_USER:-accounting}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-this-before-sharing}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    ports:
-      - '5432:5432'
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U accounting -d accounting']
       interval: 10s
@@ -23,7 +21,16 @@ services:
       - '3000:3000'
     environment:
       NODE_ENV: production
-      DATABASE_URL: postgresql://accounting:accounting@db:5432/accounting
+      AUTO_MIGRATE: '1'
+      DATABASE_URL: postgresql://${POSTGRES_USER:-accounting}:${POSTGRES_PASSWORD:-change-this-before-sharing}@db:5432/${POSTGRES_DB:-accounting}
+      DOCUMENT_STORAGE_ROOT: /app/data/scanned_docs
+      URL: ${URL:-}
+      LLM_MODEL: ${LLM_MODEL:-gemma-4}
+      LLM_PROVIDER: ${LLM_PROVIDER:-openai}
+      BEARER_TOKEN: ${BEARER_TOKEN:-}
+      OCR_OWN_NAMES: ${OCR_OWN_NAMES:-}
+    volumes:
+      - document_data:/app/data
     depends_on:
       db:
         condition: service_healthy
@@ -31,3 +38,4 @@ services:
 
 volumes:
   postgres_data:
+  document_data:

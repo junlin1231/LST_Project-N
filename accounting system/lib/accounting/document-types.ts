@@ -71,6 +71,9 @@ export interface OcrDocument {
   originalFilename: string
   mimeType: string
   fileSizeBytes: number
+  parentDocumentId?: string
+  receiptIndex?: number
+  childDocumentCount?: number
   processingStatus: DocumentProcessingStatus
   reviewStatus: PostingConfirmationStatus
   sourceChannel: DocumentSourceChannel

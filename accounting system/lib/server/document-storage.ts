@@ -1,0 +1,14 @@
+import "server-only"
+
+import path from "node:path"
+
+/**
+ * Keep uploaded evidence outside the application bundle in deployments, while
+ * preserving the existing local-development location when no override is set.
+ */
+export function documentStorageRoot() {
+  const configuredRoot = process.env.DOCUMENT_STORAGE_ROOT?.trim()
+  return configuredRoot
+    ? path.resolve(configuredRoot)
+    : path.resolve(process.cwd(), "..", "ocr", "scanned_docs")
+}
