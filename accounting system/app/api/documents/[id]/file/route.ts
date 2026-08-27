@@ -8,6 +8,16 @@ function errorResponse(error: unknown) {
   return NextResponse.json({ error: message }, { status: 500 })
 }
 
+function contentDisposition(filename: string) {
+  const extension = filename.match(/\.[a-zA-Z0-9]+$/)?.[0] ?? ""
+  const asciiBase = filename
+    .replace(extension, "")
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+  const fallback = `${asciiBase || "document"}${extension}`.replace(/"/g, "")
+  return `inline; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(filename)}`
+}
+
 export async function GET(_request: Request, context: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await context.params
@@ -15,7 +25,7 @@ export async function GET(_request: Request, context: { params: Promise<{ id: st
     return new NextResponse(file.bytes, {
       headers: {
         "Content-Type": file.mimeType,
-        "Content-Disposition": `inline; filename="${file.filename.replace(/"/g, "")}"`,
+        "Content-Disposition": contentDisposition(file.filename),
       },
     })
   } catch (error) {

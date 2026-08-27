@@ -116,32 +116,46 @@ function EditDraftDialog({
             <Input id="draft-description" value={description} onChange={(event) => setDescription(event.target.value)} />
           </div>
           <div className="space-y-3">
+            <div className="hidden grid-cols-[1fr_96px_96px] items-center gap-2 px-1 text-xs font-medium text-muted-foreground sm:grid">
+              <span>Account</span>
+              <span className="text-right">Debit</span>
+              <span className="text-right">Credit</span>
+            </div>
             {lines.map((line) => (
-              <div key={line.key} className="grid grid-cols-[1fr_96px_96px] items-center gap-2">
-                <Select value={line.accountId} onValueChange={(value) => updateLine(line.key, { accountId: value ?? "" })}>
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {accounts.map((account) => (
-                      <SelectItem key={account.id} value={account.id}>
-                        <span className="font-mono text-xs text-muted-foreground">{account.code}</span> {account.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <Input
-                  inputMode="decimal"
-                  className="text-right font-mono"
-                  value={line.debit}
-                  onChange={(event) => updateLine(line.key, { debit: event.target.value, credit: "" })}
-                />
-                <Input
-                  inputMode="decimal"
-                  className="text-right font-mono"
-                  value={line.credit}
-                  onChange={(event) => updateLine(line.key, { credit: event.target.value, debit: "" })}
-                />
+              <div key={line.key} className="grid gap-2 rounded-md border border-border p-3 sm:grid-cols-[1fr_96px_96px] sm:items-end sm:border-0 sm:p-0">
+                <div className="grid gap-1">
+                  <Label className="text-xs text-muted-foreground sm:hidden">Account</Label>
+                  <Select value={line.accountId} onValueChange={(value) => updateLine(line.key, { accountId: value ?? "" })}>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {accounts.map((account) => (
+                        <SelectItem key={account.id} value={account.id}>
+                          <span className="font-mono text-xs text-muted-foreground">{account.code}</span> {account.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="grid gap-1">
+                  <Label className="text-xs text-muted-foreground sm:hidden">Debit</Label>
+                  <Input
+                    inputMode="decimal"
+                    className="text-right font-mono"
+                    value={line.debit}
+                    onChange={(event) => updateLine(line.key, { debit: event.target.value, credit: "" })}
+                  />
+                </div>
+                <div className="grid gap-1">
+                  <Label className="text-xs text-muted-foreground sm:hidden">Credit</Label>
+                  <Input
+                    inputMode="decimal"
+                    className="text-right font-mono"
+                    value={line.credit}
+                    onChange={(event) => updateLine(line.key, { credit: event.target.value, debit: "" })}
+                  />
+                </div>
               </div>
             ))}
           </div>
@@ -252,12 +266,17 @@ export function JournalList() {
                 </div>
               </div>
               <div className="divide-y divide-border">
+                <div className="grid grid-cols-[minmax(0,1fr)_82px_82px] items-center gap-2 bg-muted/30 px-4 py-2 text-xs font-medium text-muted-foreground sm:grid-cols-[minmax(0,1fr)_120px_120px]">
+                  <span>Account</span>
+                  <span className="text-right">Debit</span>
+                  <span className="text-right">Credit</span>
+                </div>
                 {entry.lines.map((line, i) => (
                   <div
                     key={i}
-                    className="grid grid-cols-[1fr_120px_120px] items-center gap-2 px-4 py-2 text-sm"
+                    className="grid grid-cols-[minmax(0,1fr)_82px_82px] items-center gap-2 px-4 py-2 text-sm sm:grid-cols-[minmax(0,1fr)_120px_120px]"
                   >
-                    <span className={line.credit > 0 ? "pl-6 text-muted-foreground" : ""}>
+                    <span className={line.credit > 0 ? "truncate pl-4 text-muted-foreground sm:pl-6" : "truncate"}>
                       {accountName(line.accountId)}
                     </span>
                     <span className="text-right font-mono tabular-nums">

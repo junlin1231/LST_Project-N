@@ -20,15 +20,19 @@ services:
       context: .
       target: deps
     command: pnpm dev --hostname 0.0.0.0
+    env_file:
+      - .env.local
     environment:
       NODE_ENV: development
       NEXT_TELEMETRY_DISABLED: '1'
       DATABASE_URL: postgresql://accounting:accounting@db:5432/accounting
       AUTO_MIGRATE: '1'
+      OCR_STORAGE_DIR: /app/ocr/scanned_docs
     volumes:
       - .:/app
       - /app/node_modules
       - /app/.next
+      - ../ocr/scanned_docs:/app/ocr/scanned_docs
     ports:
       - '3000:3000'
     depends_on:

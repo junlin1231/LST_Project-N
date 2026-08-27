@@ -255,48 +255,6 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
       .catch(console.error)
   }, [])
 
-  const addInvoice = useCallback((invoice: Omit<Invoice, "id" | "number">) => {
-    void postAccountingAction<Invoice>({ action: "createInvoice", invoice })
-      .then((created) => setInvoices((prev) => [created, ...prev]))
-      .catch(console.error)
-  }, [])
-
-  const addVendorBill = useCallback((bill: Omit<VendorBill, "id" | "billNumber">) => {
-    void postAccountingAction<VendorBill>({ action: "createVendorBill", bill })
-      .then((created) => setVendorBills((prev) => [created, ...prev]))
-      .catch(console.error)
-  }, [])
-
-  const setInvoiceStatus = useCallback((id: string, status: Invoice["status"], confirmation: ConfirmationMetadata) => {
-    void postAccountingAction<{ ok: true }>({ action: "updateInvoiceStatus", id, status, confirmation })
-      .then(() => setInvoices((prev) => prev.map((inv) => (inv.id === id ? { ...inv, status } : inv))))
-      .catch(console.error)
-  }, [])
-
-  const setVendorBillStatus = useCallback((id: string, status: VendorBill["status"], confirmation: ConfirmationMetadata) => {
-    void postAccountingAction<{ ok: true }>({ action: "updateVendorBillStatus", id, status, confirmation })
-      .then(() => setVendorBills((prev) => prev.map((bill) => (bill.id === id ? { ...bill, status } : bill))))
-      .catch(console.error)
-  }, [])
-
-  const addWorkflowDocument = useCallback((document: Omit<WorkflowDocument, "id" | "documentNumber">) => {
-    void postAccountingAction<WorkflowDocument>({ action: "createWorkflowDocument", document })
-      .then((created) => setWorkflowDocuments((prev) => [created, ...prev]))
-      .catch(console.error)
-  }, [])
-
-  const setWorkflowDocumentStatus = useCallback((id: string, status: string, confirmation: ConfirmationMetadata) => {
-    void postAccountingAction<{ ok: true }>({ action: "updateWorkflowDocumentStatus", id, status, confirmation })
-      .then(() => setWorkflowDocuments((prev) => prev.map((document) => (document.id === id ? { ...document, status } : document))))
-      .catch(console.error)
-  }, [])
-
-  const updateWorkflowDocument = useCallback((id: string, document: Omit<WorkflowDocument, "id" | "documentNumber" | "documentType">) => {
-    void postAccountingAction<WorkflowDocument>({ action: "updateWorkflowDocument", id, document })
-      .then((updated) => setWorkflowDocuments((prev) => prev.map((existing) => (existing.id === id ? updated : existing))))
-      .catch(console.error)
-  }, [])
-
   const applySnapshot = useCallback((snapshot: AccountingSnapshot) => {
     setAccounts(snapshot.accounts)
     setJournalEntries(snapshot.journalEntries)
@@ -315,6 +273,48 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
     setDepreciationSchedules(snapshot.depreciationSchedules)
     setAuditLogs(snapshot.auditLogs)
   }, [])
+
+  const addInvoice = useCallback((invoice: Omit<Invoice, "id" | "number">) => {
+    void postAccountingAction<AccountingSnapshot>({ action: "createInvoice", invoice })
+      .then(applySnapshot)
+      .catch(console.error)
+  }, [applySnapshot])
+
+  const addVendorBill = useCallback((bill: Omit<VendorBill, "id" | "billNumber">) => {
+    void postAccountingAction<AccountingSnapshot>({ action: "createVendorBill", bill })
+      .then(applySnapshot)
+      .catch(console.error)
+  }, [applySnapshot])
+
+  const setInvoiceStatus = useCallback((id: string, status: Invoice["status"], confirmation: ConfirmationMetadata) => {
+    void postAccountingAction<AccountingSnapshot>({ action: "updateInvoiceStatus", id, status, confirmation })
+      .then(applySnapshot)
+      .catch(console.error)
+  }, [applySnapshot])
+
+  const setVendorBillStatus = useCallback((id: string, status: VendorBill["status"], confirmation: ConfirmationMetadata) => {
+    void postAccountingAction<AccountingSnapshot>({ action: "updateVendorBillStatus", id, status, confirmation })
+      .then(applySnapshot)
+      .catch(console.error)
+  }, [applySnapshot])
+
+  const addWorkflowDocument = useCallback((document: Omit<WorkflowDocument, "id" | "documentNumber">) => {
+    void postAccountingAction<AccountingSnapshot>({ action: "createWorkflowDocument", document })
+      .then(applySnapshot)
+      .catch(console.error)
+  }, [applySnapshot])
+
+  const setWorkflowDocumentStatus = useCallback((id: string, status: string, confirmation: ConfirmationMetadata) => {
+    void postAccountingAction<AccountingSnapshot>({ action: "updateWorkflowDocumentStatus", id, status, confirmation })
+      .then(applySnapshot)
+      .catch(console.error)
+  }, [applySnapshot])
+
+  const updateWorkflowDocument = useCallback((id: string, document: Omit<WorkflowDocument, "id" | "documentNumber" | "documentType">) => {
+    void postAccountingAction<AccountingSnapshot>({ action: "updateWorkflowDocument", id, document })
+      .then(applySnapshot)
+      .catch(console.error)
+  }, [applySnapshot])
 
   const addOpeningStockAction = useCallback(async (openingStock: OpeningStockInput) => {
     const snapshot = await postAccountingAction<AccountingSnapshot>({ action: "createOpeningStock", openingStock })

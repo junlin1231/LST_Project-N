@@ -46,7 +46,7 @@ async function exec(db: DbExecutor, sql: string, values?: unknown[]) {
 
 async function seedDefaultRuleAccounts(db: DbExecutor) {
   const accounts = [
-    { id: DEFAULT_ACCOUNTING_RULE_CONFIG.accountsReceivableAccountId, code: "1200", name: "Accounts Receivable", type: "asset" },
+    { id: DEFAULT_ACCOUNTING_RULE_CONFIG.accountsReceivableAccountId, code: "1200", name: "Trade Receivables", type: "asset" },
     { id: DEFAULT_ACCOUNTING_RULE_CONFIG.cashAccountId, code: "1010", name: "Cash / Bank", type: "asset" },
     { id: DEFAULT_ACCOUNTING_RULE_CONFIG.revenueAccountId, code: "4000", name: "Sales Revenue", type: "revenue" },
     { id: DEFAULT_ACCOUNTING_RULE_CONFIG.taxPayableAccountId, code: "2100", name: "Tax Payable", type: "liability" },
@@ -75,7 +75,7 @@ async function seedDefaultRuleAccounts(db: DbExecutor) {
       db,
       `INSERT INTO accounts (id, company_id, code, name, type)
        VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT (id) DO NOTHING`,
+       ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, updated_at = NOW()`,
       [account.id, DEFAULT_COMPANY_ID, account.code, account.name, account.type],
     )
   }

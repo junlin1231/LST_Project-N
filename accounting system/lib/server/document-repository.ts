@@ -91,7 +91,33 @@ interface ConfirmationRow {
 }
 
 function storageRoot() {
+  if (process.env.OCR_STORAGE_DIR?.trim()) return path.resolve(process.env.OCR_STORAGE_DIR.trim())
   return path.resolve(process.cwd(), "..", "ocr", "scanned_docs")
+}
+
+function isInsideStorageRoot(candidate: string, root: string) {
+  const normalizedRoot = path.resolve(root)
+  const normalizedCandidate = path.resolve(candidate)
+  const relative = path.relative(normalizedRoot, normalizedCandidate)
+  return relative === "" || (!!relative && !relative.startsWith("..") && !path.isAbsolute(relative))
+}
+
+function storedFilename(storagePath: string) {
+  const posixName = path.basename(storagePath)
+  const winName = path.win32.basename(storagePath)
+  return winName.length < posixName.length ? winName : posixName
+}
+
+function resolveStoredDocumentPath(storagePath: string) {
+  const root = storageRoot()
+  const resolved = path.resolve(storagePath)
+  if (isInsideStorageRoot(resolved, root)) return resolved
+
+  const filename = storedFilename(storagePath)
+  if (!filename || filename.includes("/") || filename.includes("\\")) {
+    throw new Error("Document storage path is invalid.")
+  }
+  return path.join(root, DEFAULT_COMPANY_ID, filename)
 }
 
 function safeFilename(filename: string) {
@@ -311,9 +337,7 @@ export async function getDocumentFile(id: string) {
   await ensureDemoCompany()
   const row = await getDocumentRow(id)
   if (!row) throw new Error("Document was not found.")
-  const root = storageRoot()
-  const resolved = path.resolve(row.storage_path)
-  if (!resolved.startsWith(root)) throw new Error("Document storage path is invalid.")
+  const resolved = resolveStoredDocumentPath(row.storage_path)
   return {
     filename: row.original_filename,
     mimeType: row.mime_type,
@@ -341,9 +365,7 @@ export async function deleteUnpostedDocument(id: string) {
   )
   if (postedDraft.rows[0]) throw new Error("Documents with posted journal entries cannot be deleted.")
 
-  const root = storageRoot()
-  const resolved = path.resolve(row.storage_path)
-  if (!resolved.startsWith(root)) throw new Error("Document storage path is invalid.")
+  const resolved = resolveStoredDocumentPath(row.storage_path)
 
   await transaction(async (client) => {
     await exec(client, "DELETE FROM documents WHERE id = $1 AND company_id = $2", [id, DEFAULT_COMPANY_ID])
@@ -362,7 +384,7 @@ function needsReview(ocrConfidence: number | undefined, categoryConfidence: numb
   if (categoryConfidence < HIGH_CONFIDENCE) warnings.push("Category confidence is below 85%.")
   if (category === "unknown") warnings.push("Category is unknown.")
   if (!fields.documentDate) warnings.push("Document date is required.")
-  if (!Number.isFinite(fields.totalAmount) || fields.totalAmount <= 0) warnings.push("Total amount must be greater than zero.")
+  if (category !== "bank_document" && (!Number.isFinite(fields.totalAmount) || fields.totalAmount <= 0)) warnings.push("Total amount must be greater than zero.")
   if (Math.abs(Number((fields.subtotal + otherCharges + fields.taxAmount - fields.totalAmount).toFixed(2))) > 0.02) warnings.push("Subtotal plus charges plus tax does not match total.")
   const journalEntry: JournalEntry = { id: "validation", date: fields.documentDate || new Date().toISOString().slice(0, 10), description: "Validation", lines }
   if (lines.length > 0 && !isJournalEntryBalanced(journalEntry)) warnings.push("Suggested journal entry is not balanced.")
@@ -376,7 +398,7 @@ export async function processDocument(id: string) {
 
   try {
     await query("UPDATE documents SET processing_status = 'ocr_processing', updated_at = NOW() WHERE id = $1 AND company_id = $2", [id, DEFAULT_COMPANY_ID])
-    const ocr = await ocrAdapter.extract({ filePath: row.storage_path, mimeType: row.mime_type, originalFilename: row.original_filename })
+    const ocr = await ocrAdapter.extract({ filePath: resolveStoredDocumentPath(row.storage_path), mimeType: row.mime_type, originalFilename: row.original_filename })
     const category = await categorizationAdapter.categorize({ rawText: ocr.rawText, extractedFields: ocr.fields })
     const warnings = needsReview(ocr.confidence, category.confidence, category.category, category.normalizedFields, category.suggestedJournalLines)
     const normalizedFields = { ...category.normalizedFields, warnings }
