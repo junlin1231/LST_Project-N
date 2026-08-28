@@ -20,7 +20,7 @@ function localEnvPaths() {
     path.join(cwd, "accounting system", ".env.local"),
     path.join(cwd, "..", ".env.local"),
     path.join(cwd, "..", "accounting system", ".env.local"),
-  ].map((candidate) => path.resolve(candidate))))
+  ]))
 }
 
 export function getServerEnvDiagnostics() {

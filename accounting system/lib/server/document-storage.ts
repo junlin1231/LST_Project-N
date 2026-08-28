@@ -12,3 +12,13 @@ export function documentStorageRoot() {
     ? path.resolve(configuredRoot)
     : path.resolve(process.cwd(), "..", "ocr", "scanned_docs")
 }
+
+export function resolveStoredDocumentPath(storagePath: string) {
+  const root = documentStorageRoot()
+  const resolved = path.resolve(storagePath)
+  const relativePath = path.relative(root, resolved)
+  if (relativePath === "" || (!relativePath.startsWith("..") && !path.isAbsolute(relativePath))) {
+    return resolved
+  }
+  throw new Error("Document storage path is invalid.")
+}

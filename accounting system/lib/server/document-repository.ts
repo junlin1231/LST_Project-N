@@ -24,7 +24,7 @@ import { ensureDatabaseReady, query, transaction, type DbExecutor } from "./db"
 import { categorizationAdapter } from "./categorization-adapter"
 import { ocrAdapter } from "./ocr-adapter"
 import { splitImageIntoReceipts } from "./receipt-splitter"
-import { documentStorageRoot } from "./document-storage"
+import { documentStorageRoot, resolveStoredDocumentPath } from "./document-storage"
 
 const MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024
 const ALLOWED_MIME_TYPES = new Set([
@@ -326,9 +326,7 @@ export async function getDocumentFile(id: string) {
   await ensureDemoCompany()
   const row = await getDocumentRow(id)
   if (!row) throw new Error("Document was not found.")
-  const root = documentStorageRoot()
-  const resolved = path.resolve(row.storage_path)
-  if (!resolved.startsWith(root)) throw new Error("Document storage path is invalid.")
+  const resolved = resolveStoredDocumentPath(row.storage_path)
   return {
     filename: row.original_filename,
     mimeType: row.mime_type,
@@ -356,9 +354,7 @@ export async function deleteUnpostedDocument(id: string) {
   )
   if (postedDraft.rows[0]) throw new Error("Documents with posted journal entries cannot be deleted.")
 
-  const root = documentStorageRoot()
-  const resolved = path.resolve(row.storage_path)
-  if (!resolved.startsWith(root)) throw new Error("Document storage path is invalid.")
+  const resolved = resolveStoredDocumentPath(row.storage_path)
 
   await transaction(async (client) => {
     await exec(client, "DELETE FROM documents WHERE id = $1 AND company_id = $2", [id, DEFAULT_COMPANY_ID])
@@ -496,16 +492,16 @@ export async function processDocument(id: string): Promise<DocumentProcessResult
   let children = await childDocumentRows(id)
   if (children.length === 0) {
     const regions = await ocrAdapter.detectReceiptRegions({
-      filePath: row.storage_path,
+      filePath: resolveStoredDocumentPath(row.storage_path),
       mimeType: row.mime_type,
       originalFilename: row.original_filename,
     })
     if (regions.length < 2) return { detail: await processOneDocument(id) }
 
     await query("UPDATE documents SET processing_status = 'ocr_processing', updated_at = NOW() WHERE id = $1 AND company_id = $2", [id, DEFAULT_COMPANY_ID])
-    const crops = await splitImageIntoReceipts({ filePath: row.storage_path, regions })
+    const crops = await splitImageIntoReceipts({ filePath: resolveStoredDocumentPath(row.storage_path), regions })
     const baseName = path.basename(row.original_filename, path.extname(row.original_filename)) || "receipt"
-    await Promise.all(crops.map((bytes, index) => createDocumentUpload({
+    await Promise.all(crops.map((bytes: Buffer, index: number) => createDocumentUpload({
       filename: `${baseName}-receipt-${String(index + 1).padStart(2, "0")}.jpg`,
       mimeType: "image/jpeg",
       bytes,
