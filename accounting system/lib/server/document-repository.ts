@@ -23,7 +23,7 @@ import { DEFAULT_COMPANY_ID, DEFAULT_USER_ID, insertJournalEntry } from "./accou
 import { ensureDatabaseReady, query, transaction, type DbExecutor } from "./db"
 import { categorizationAdapter } from "./categorization-adapter"
 import { ocrAdapter } from "./ocr-adapter"
-import { splitImageIntoReceipts } from "./receipt-splitter"
+import { splitDocumentIntoReceipts } from "./receipt-splitter"
 import { documentStorageRoot } from "./document-storage"
 
 const MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024
@@ -489,7 +489,8 @@ export async function processDocument(id: string): Promise<DocumentProcessResult
   }
 
   // Child documents are already cropped. Re-scanning one must never create another generation of children.
-  if (row.parent_document_id || !row.mime_type.startsWith("image/")) {
+  const canSplitReceipts = row.mime_type.startsWith("image/") || row.mime_type === "application/pdf"
+  if (row.parent_document_id || !canSplitReceipts) {
     return { detail: await processOneDocument(id) }
   }
 
@@ -503,7 +504,7 @@ export async function processDocument(id: string): Promise<DocumentProcessResult
     if (regions.length < 2) return { detail: await processOneDocument(id) }
 
     await query("UPDATE documents SET processing_status = 'ocr_processing', updated_at = NOW() WHERE id = $1 AND company_id = $2", [id, DEFAULT_COMPANY_ID])
-    const crops = await splitImageIntoReceipts({ filePath: row.storage_path, regions })
+    const crops = await splitDocumentIntoReceipts({ filePath: row.storage_path, mimeType: row.mime_type, regions })
     const baseName = path.basename(row.original_filename, path.extname(row.original_filename)) || "receipt"
     await Promise.all(crops.map((bytes, index) => createDocumentUpload({
       filename: `${baseName}-receipt-${String(index + 1).padStart(2, "0")}.jpg`,

@@ -139,7 +139,8 @@ async function renderPdfPages(input: { filePath: string; maxPages?: number }) {
       .filter((file) => /^page-\d+\.png$/.test(file))
       .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
 
-    return Promise.all(files.map(async (file) => ({
+    return Promise.all(files.map(async (file, index) => ({
+      page: index + 1,
       mimeType: "image/png",
       bytes: await fs.readFile(path.join(tempDir, file)),
     })))
@@ -220,12 +221,22 @@ function normalizeReceiptRegions(value: unknown): ReceiptRegion[] {
     .slice(0, 10)
 }
 
-async function detectReceiptRegionsWithGemma(input: { filePath: string; mimeType: string; originalFilename: string }): Promise<ReceiptRegion[]> {
+type ReceiptDetectionType = "bank_statement" | "other"
+
+interface ReceiptDetection {
+  documentType: ReceiptDetectionType
+  regions: ReceiptRegion[]
+}
+
+function receiptDetectionType(value: unknown): ReceiptDetectionType {
+  return value === "bank_statement" ? value : "other"
+}
+
+async function detectReceiptRegionsInImage(input: { bytes: Buffer; mimeType: string; originalFilename: string; allowSingleReceipt: boolean }): Promise<ReceiptDetection> {
   const env = getServerEnv()
-  if (!env.aiBaseUrl || !input.mimeType.startsWith("image/")) return []
+  if (!env.aiBaseUrl) return { documentType: "other", regions: [] }
   if (env.aiProvider !== "openai") throw new Error(`Unsupported LLM_PROVIDER for receipt detection: ${env.aiProvider}.`)
 
-  const bytes = await fs.readFile(input.filePath)
   const headers: Record<string, string> = { "Content-Type": "application/json" }
   if (env.aiApiKey) headers.Authorization = `Bearer ${env.aiApiKey}`
   const payload = await fetchAiJson(chatCompletionsUrl(env.aiBaseUrl), {
@@ -239,10 +250,15 @@ async function detectReceiptRegionsWithGemma(input: { filePath: string; mimeType
           role: "system",
           content: [
             "You detect separate, physically distinct receipts in a single image.",
-            "Return only JSON: {\"receipts\":[{\"x\":0,\"y\":0,\"width\":0,\"height\":0}]}",
+            "Return only JSON: {\"documentType\":\"other\",\"receipts\":[{\"x\":0,\"y\":0,\"width\":0,\"height\":0}]}",
+            "documentType must be exactly one of: bank_statement, other.",
+            "Use bank_statement for bank, card, or account statements, including statements with several pages, transaction rows, account balances, or running balances. Never split a bank statement.",
+            "Use other for every document that is not a bank statement. Those documents may be split when they contain separate, complete documents.",
             "Coordinates must be normalized fractions from 0 to 1 of the whole image.",
-            "Include a region only when it is a complete separate receipt, invoice, or payment slip. Do not split one long receipt into sections.",
-            "Return exactly one region or an empty receipts array when there are not at least two separate receipts.",
+            "Include a region only for a complete separate document. Do not split one long document into sections.",
+            input.allowSingleReceipt
+              ? "This is one page from a PDF. Return every complete document on the page, including a single document when it fills most of the page."
+              : "Return an empty receipts array unless there are at least two separate documents in the image.",
             "Keep a small margin around every receipt and do not return overlapping regions.",
           ].join("\n"),
         },
@@ -250,14 +266,43 @@ async function detectReceiptRegionsWithGemma(input: { filePath: string; mimeType
           role: "user",
           content: [
             { type: "text", text: `Find separately scannable receipts in ${input.originalFilename}.` },
-            { type: "image_url", image_url: { url: `data:${input.mimeType};base64,${bytes.toString("base64")}`, detail: "high" } },
+            { type: "image_url", image_url: { url: `data:${input.mimeType};base64,${input.bytes.toString("base64")}`, detail: "high" } },
           ],
         },
       ],
     }),
   }, 120_000) as { choices?: Array<{ message?: { content?: string } }> }
   const json = extractJsonObject(payload.choices?.[0]?.message?.content ?? "")
+  const documentType = receiptDetectionType(json?.documentType)
+  if (documentType === "bank_statement") return { documentType, regions: [] }
   const regions = normalizeReceiptRegions(json?.receipts)
+  return { documentType, regions: input.allowSingleReceipt ? regions : regions.length > 1 ? regions : [] }
+}
+
+async function detectReceiptRegionsWithGemma(input: { filePath: string; mimeType: string; originalFilename: string }): Promise<ReceiptRegion[]> {
+  if (input.mimeType.startsWith("image/")) {
+    const detection = await detectReceiptRegionsInImage({
+      bytes: await fs.readFile(input.filePath),
+      mimeType: input.mimeType,
+      originalFilename: input.originalFilename,
+      allowSingleReceipt: false,
+    })
+    return detection.regions
+  }
+  if (input.mimeType !== "application/pdf") return []
+
+  const pages = await renderPdfPages({ filePath: input.filePath, maxPages: 10 })
+  const regions: ReceiptRegion[] = []
+  for (const page of pages) {
+    const detection = await detectReceiptRegionsInImage({
+      bytes: page.bytes,
+      mimeType: page.mimeType,
+      originalFilename: `${input.originalFilename} (page ${page.page})`,
+      allowSingleReceipt: true,
+    })
+    if (detection.documentType === "bank_statement") return []
+    regions.push(...detection.regions.map((region) => ({ ...region, page: page.page })))
+  }
   return regions.length > 1 ? regions : []
 }
 
