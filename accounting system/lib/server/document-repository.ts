@@ -326,6 +326,20 @@ export async function getDocumentDetail(id: string): Promise<OcrDocumentDetail> 
   }
 }
 
+export async function getDocumentDetailByJournalEntryId(journalEntryId: string): Promise<OcrDocumentDetail | null> {
+  await ensureDemoCompany()
+  const result = await query<{ document_id: string }>(
+    `SELECT document_id
+     FROM document_accounting_drafts
+     WHERE company_id = $1 AND journal_entry_id = $2
+     ORDER BY updated_at DESC
+     LIMIT 1`,
+    [DEFAULT_COMPANY_ID, journalEntryId],
+  )
+  const documentId = result.rows[0]?.document_id
+  return documentId ? getDocumentDetail(documentId) : null
+}
+
 export async function getDocumentFile(id: string) {
   await ensureDemoCompany()
   const row = await getDocumentRow(id)

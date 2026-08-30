@@ -1,7 +1,7 @@
 "use client"
 
 import { useMemo, useState } from "react"
-import { Calculator, CalendarDays, Download, FileText, Landmark, Plus, Save } from "lucide-react"
+import { Calculator, CalendarDays, Download, ExternalLink, FileText, Landmark, Plus, Save } from "lucide-react"
 import { Amount } from "@/components/amount"
 import { ConfirmationDialog } from "@/components/governance/confirmation-dialog"
 import { Badge } from "@/components/ui/badge"
@@ -28,7 +28,8 @@ import {
   calculateMonthlyDepreciation,
   DEFAULT_RETAINED_EARNINGS_ACCOUNT_ID,
 } from "@/lib/accounting/reports"
-import { ACCOUNT_TYPE_LABEL, type Account, type DepreciationSchedule, type FixedAsset, type JournalEntry, type ReportLine, type ReportSection, type WorkflowDocumentType } from "@/lib/accounting/types"
+import type { OcrDocumentDetail } from "@/lib/accounting/document-types"
+import { ACCOUNT_TYPE_LABEL, type Account, type DepreciationSchedule, type FixedAsset, type Invoice, type JournalEntry, type PaymentVoucher, type Receipt, type ReportLine, type ReportSection, type VendorBill, type WorkflowDocument, type WorkflowDocumentType } from "@/lib/accounting/types"
 
 const today = new Date().toISOString().slice(0, 10)
 const yearStart = `${today.slice(0, 4)}-01-01`
@@ -54,6 +55,13 @@ interface RelatedDocument {
   status: string
   amount: number
 }
+
+type RelatedDocumentDetail =
+  | { type: "Invoice"; record: Invoice }
+  | { type: "Vendor Bill"; record: VendorBill }
+  | { type: "Receipt"; record: Receipt }
+  | { type: "Payment Voucher"; record: PaymentVoucher }
+  | { type: "Workflow Document"; record: WorkflowDocument }
 
 function titleCase(value: string) {
   return value.split("_").map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(" ")
@@ -194,6 +202,10 @@ export function ReportsView() {
   const [pendingClose, setPendingClose] = useState(false)
   const [retainedEarningsAccountId, setRetainedEarningsAccountId] = useState(DEFAULT_RETAINED_EARNINGS_ACCOUNT_ID)
   const [drillTarget, setDrillTarget] = useState<DrillTarget | null>(null)
+  const [selectedEntryDetail, setSelectedEntryDetail] = useState<JournalEntry | null>(null)
+  const [selectedDocumentDetail, setSelectedDocumentDetail] = useState<RelatedDocumentDetail | null>(null)
+  const [reviewDocument, setReviewDocument] = useState<OcrDocumentDetail | null>(null)
+  const [reviewDocumentState, setReviewDocumentState] = useState<"idle" | "loading" | "missing" | "error">("idle")
 
   const trialBalance = useMemo(() => buildTrialBalance(accounts, journalEntries.filter((entry) => entry.date <= periodEnd)), [accounts, journalEntries, periodEnd])
   const trialBalanceSections = useMemo(() => trialBalanceTypeOrder
@@ -344,6 +356,47 @@ export function ReportsView() {
 
     return related
   }, [contactName, drillEntries, drillTarget, invoices, paymentVouchers, receipts, vendorBills, workflowDocuments])
+
+  function openDocumentDetail(document: RelatedDocument) {
+    if (document.type === "Invoice") {
+      const record = invoices.find((invoice) => invoice.id === document.id)
+      if (record) setSelectedDocumentDetail({ type: "Invoice", record })
+      return
+    }
+    if (document.type === "Vendor Bill") {
+      const record = vendorBills.find((bill) => bill.id === document.id)
+      if (record) setSelectedDocumentDetail({ type: "Vendor Bill", record })
+      return
+    }
+    if (document.type === "Receipt") {
+      const record = receipts.find((receipt) => receipt.id === document.id)
+      if (record) setSelectedDocumentDetail({ type: "Receipt", record })
+      return
+    }
+    if (document.type === "Payment Voucher") {
+      const record = paymentVouchers.find((voucher) => voucher.id === document.id)
+      if (record) setSelectedDocumentDetail({ type: "Payment Voucher", record })
+      return
+    }
+    const record = workflowDocuments.find((workflowDocument) => workflowDocument.id === document.id)
+    if (record) setSelectedDocumentDetail({ type: "Workflow Document", record })
+  }
+
+  async function openEntryDetail(entry: JournalEntry) {
+    setSelectedEntryDetail(entry)
+    setReviewDocument(null)
+    setReviewDocumentState("loading")
+    try {
+      const response = await fetch(`/api/documents?journalEntryId=${encodeURIComponent(entry.id)}`, { cache: "no-store" })
+      if (!response.ok) throw new Error(`Document lookup failed: ${response.status}`)
+      const document = await response.json() as OcrDocumentDetail | null
+      setReviewDocument(document)
+      setReviewDocumentState(document ? "idle" : "missing")
+    } catch (error) {
+      console.error(error)
+      setReviewDocumentState("error")
+    }
+  }
 
   function openAccountPeriod(line: ReportLine, sectionLabel: string) {
     setDrillTarget({
@@ -760,7 +813,15 @@ export function ReportsView() {
         </TabsContent>
       </Tabs>
 
-      <Dialog open={drillTarget !== null} onOpenChange={(open) => { if (!open) setDrillTarget(null) }}>
+      <Dialog open={drillTarget !== null} onOpenChange={(open) => {
+        if (!open) {
+          setDrillTarget(null)
+          setSelectedEntryDetail(null)
+          setSelectedDocumentDetail(null)
+          setReviewDocument(null)
+          setReviewDocumentState("idle")
+        }
+      }}>
         {drillTarget ? (
           <DialogContent className="sm:max-w-5xl">
             <DialogHeader>
@@ -809,7 +870,19 @@ export function ReportsView() {
                       </TableHeader>
                       <TableBody>
                         {drillEntries.map((entry) => (
-                          <TableRow key={entry.id}>
+                          <TableRow
+                            key={entry.id}
+                            role="button"
+                            tabIndex={0}
+                            className="cursor-pointer"
+                            onClick={() => void openEntryDetail(entry)}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter" || event.key === " ") {
+                                event.preventDefault()
+                                void openEntryDetail(entry)
+                              }
+                            }}
+                          >
                             <TableCell>{formatDate(entry.date)}</TableCell>
                             <TableCell className="font-mono text-sm">{entry.reference ?? "-"}</TableCell>
                             <TableCell className="font-medium">{entry.description}</TableCell>
@@ -865,7 +938,19 @@ export function ReportsView() {
                       </TableHeader>
                       <TableBody>
                         {relatedDocuments.map((document) => (
-                          <TableRow key={`${document.type}-${document.id}`}>
+                          <TableRow
+                            key={`${document.type}-${document.id}`}
+                            role="button"
+                            tabIndex={0}
+                            className="cursor-pointer"
+                            onClick={() => openDocumentDetail(document)}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter" || event.key === " ") {
+                                event.preventDefault()
+                                openDocumentDetail(document)
+                              }
+                            }}
+                          >
                             <TableCell>{document.type}</TableCell>
                             <TableCell className="font-mono text-sm">{document.number}</TableCell>
                             <TableCell className="font-medium">{document.party ?? "-"}</TableCell>
@@ -880,6 +965,185 @@ export function ReportsView() {
                 </CardContent>
               </Card>
             </section>
+          </DialogContent>
+        ) : null}
+      </Dialog>
+
+      <Dialog open={selectedEntryDetail !== null} onOpenChange={(open) => {
+        if (!open) {
+          setSelectedEntryDetail(null)
+          setReviewDocument(null)
+          setReviewDocumentState("idle")
+        }
+      }}>
+        {selectedEntryDetail ? (
+          <DialogContent className="sm:max-w-4xl">
+            <DialogHeader>
+              <DialogTitle>{selectedEntryDetail.reference ?? selectedEntryDetail.id}</DialogTitle>
+              <DialogDescription>{selectedEntryDetail.description}</DialogDescription>
+            </DialogHeader>
+
+            <div className="grid gap-3 sm:grid-cols-4">
+              <div className="rounded-lg border border-border p-3">
+                <p className="text-xs text-muted-foreground">Date</p>
+                <p className="mt-1 font-medium">{formatDate(selectedEntryDetail.date)}</p>
+              </div>
+              <div className="rounded-lg border border-border p-3">
+                <p className="text-xs text-muted-foreground">Status</p>
+                <div className="mt-1"><Badge variant={selectedEntryDetail.status === "draft" ? "outline" : "secondary"}>{titleCase(selectedEntryDetail.status ?? "posted")}</Badge></div>
+              </div>
+              <div className="rounded-lg border border-border p-3">
+                <p className="text-xs text-muted-foreground">Debit Total</p>
+                <Amount value={selectedEntryDetail.lines.reduce((sum, line) => sum + line.debit, 0)} className="mt-1 font-semibold" />
+              </div>
+              <div className="rounded-lg border border-border p-3">
+                <p className="text-xs text-muted-foreground">Credit Total</p>
+                <Amount value={selectedEntryDetail.lines.reduce((sum, line) => sum + line.credit, 0)} className="mt-1 font-semibold" />
+              </div>
+            </div>
+
+            <section className="space-y-2">
+              <h3 className="text-sm font-semibold">Journal Lines</h3>
+              <Card>
+                <CardContent className="p-0">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Account</TableHead>
+                        <TableHead>Type</TableHead>
+                        <TableHead className="text-right">Debit</TableHead>
+                        <TableHead className="text-right">Credit</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {selectedEntryDetail.lines.map((line, index) => {
+                        const account = accountById.get(line.accountId)
+                        return (
+                          <TableRow key={`${selectedEntryDetail.id}-${line.accountId}-${index}`}>
+                            <TableCell>
+                              <span className="font-mono text-xs text-muted-foreground">{account?.code ?? line.accountId}</span>
+                              <span className="ml-2 font-medium">{account?.name ?? line.accountId}</span>
+                            </TableCell>
+                            <TableCell>{account ? ACCOUNT_TYPE_LABEL[account.type] : "-"}</TableCell>
+                            <TableCell className="text-right"><Amount value={line.debit} muted={line.debit === 0} /></TableCell>
+                            <TableCell className="text-right"><Amount value={line.credit} muted={line.credit === 0} /></TableCell>
+                          </TableRow>
+                        )
+                      })}
+                    </TableBody>
+                  </Table>
+                </CardContent>
+              </Card>
+              <dl className="grid gap-2 text-sm sm:grid-cols-[8rem_1fr]">
+                <dt className="text-muted-foreground">Journal ID</dt>
+                <dd className="break-all font-mono">{selectedEntryDetail.id}</dd>
+                <dt className="text-muted-foreground">Reference</dt>
+                <dd className="font-mono">{selectedEntryDetail.reference ?? "-"}</dd>
+                <dt className="text-muted-foreground">Posted At</dt>
+                <dd>{selectedEntryDetail.postedAt ? formatDate(selectedEntryDetail.postedAt.slice(0, 10)) : "-"}</dd>
+              </dl>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    if (reviewDocument) window.location.href = `/documents?documentId=${encodeURIComponent(reviewDocument.id)}`
+                  }}
+                  disabled={!reviewDocument}
+                >
+                  <ExternalLink className="size-4" />
+                  Review Document
+                </Button>
+                {reviewDocumentState === "loading" ? <span className="text-xs text-muted-foreground">Looking for linked OCR document...</span> : null}
+                {reviewDocumentState === "missing" ? <span className="text-xs text-muted-foreground">No OCR review document is linked to this journal entry.</span> : null}
+                {reviewDocumentState === "error" ? <span className="text-xs text-destructive">Could not check for a linked OCR document.</span> : null}
+              </div>
+            </section>
+          </DialogContent>
+        ) : null}
+      </Dialog>
+
+      <Dialog open={selectedDocumentDetail !== null} onOpenChange={(open) => { if (!open) setSelectedDocumentDetail(null) }}>
+        {selectedDocumentDetail ? (
+          <DialogContent className="sm:max-w-4xl">
+            <DialogHeader>
+              <DialogTitle>
+                {selectedDocumentDetail.type === "Invoice" ? selectedDocumentDetail.record.number
+                  : selectedDocumentDetail.type === "Vendor Bill" ? selectedDocumentDetail.record.billNumber
+                    : selectedDocumentDetail.type === "Receipt" ? selectedDocumentDetail.record.receiptNumber
+                      : selectedDocumentDetail.type === "Payment Voucher" ? selectedDocumentDetail.record.voucherNumber
+                        : selectedDocumentDetail.record.documentNumber}
+              </DialogTitle>
+              <DialogDescription>{selectedDocumentDetail.type} detail from the selected report line.</DialogDescription>
+            </DialogHeader>
+
+            {selectedDocumentDetail.type === "Invoice" ? (
+              <>
+                <div className="grid gap-3 sm:grid-cols-4">
+                  <div className="rounded-lg border border-border p-3"><p className="text-xs text-muted-foreground">Customer</p><p className="mt-1 font-medium">{contactName(selectedDocumentDetail.record.clientId)}</p></div>
+                  <div className="rounded-lg border border-border p-3"><p className="text-xs text-muted-foreground">Issue Date</p><p className="mt-1 font-medium">{formatDate(selectedDocumentDetail.record.issueDate)}</p></div>
+                  <div className="rounded-lg border border-border p-3"><p className="text-xs text-muted-foreground">Due Date</p><p className="mt-1 font-medium">{formatDate(selectedDocumentDetail.record.dueDate)}</p></div>
+                  <div className="rounded-lg border border-border p-3"><p className="text-xs text-muted-foreground">Total</p><Amount value={invoiceTotal(selectedDocumentDetail.record)} className="mt-1 font-semibold" /></div>
+                </div>
+                <Card className="overflow-hidden py-0">
+                  <Table>
+                    <TableHeader><TableRow><TableHead>Description</TableHead><TableHead className="text-right">Qty</TableHead><TableHead className="text-right">Unit Price</TableHead><TableHead className="text-right">Line Total</TableHead></TableRow></TableHeader>
+                    <TableBody>{selectedDocumentDetail.record.items.map((item) => <TableRow key={item.id}><TableCell>{item.description}</TableCell><TableCell className="text-right">{item.quantity}</TableCell><TableCell className="text-right"><Amount value={item.unitPrice} /></TableCell><TableCell className="text-right"><Amount value={item.quantity * item.unitPrice} /></TableCell></TableRow>)}</TableBody>
+                  </Table>
+                </Card>
+              </>
+            ) : null}
+
+            {selectedDocumentDetail.type === "Vendor Bill" ? (
+              <div className="grid gap-3 sm:grid-cols-4">
+                <div className="rounded-lg border border-border p-3"><p className="text-xs text-muted-foreground">Vendor</p><p className="mt-1 font-medium">{contactName(selectedDocumentDetail.record.vendorId)}</p></div>
+                <div className="rounded-lg border border-border p-3"><p className="text-xs text-muted-foreground">Bill Date</p><p className="mt-1 font-medium">{formatDate(selectedDocumentDetail.record.billDate)}</p></div>
+                <div className="rounded-lg border border-border p-3"><p className="text-xs text-muted-foreground">Due Date</p><p className="mt-1 font-medium">{formatDate(selectedDocumentDetail.record.dueDate)}</p></div>
+                <div className="rounded-lg border border-border p-3"><p className="text-xs text-muted-foreground">Total</p><Amount value={selectedDocumentDetail.record.totalAmount} className="mt-1 font-semibold" /></div>
+                <div className="rounded-lg border border-border p-3"><p className="text-xs text-muted-foreground">Subtotal</p><Amount value={selectedDocumentDetail.record.subtotal} className="mt-1 font-semibold" /></div>
+                <div className="rounded-lg border border-border p-3"><p className="text-xs text-muted-foreground">Tax</p><Amount value={selectedDocumentDetail.record.taxAmount} className="mt-1 font-semibold" /></div>
+                <div className="rounded-lg border border-border p-3"><p className="text-xs text-muted-foreground">Status</p><div className="mt-1"><Badge variant={selectedDocumentDetail.record.status === "paid" ? "secondary" : "outline"}>{titleCase(selectedDocumentDetail.record.status)}</Badge></div></div>
+                <div className="rounded-lg border border-border p-3"><p className="text-xs text-muted-foreground">Bill ID</p><p className="mt-1 break-all font-mono text-xs">{selectedDocumentDetail.record.id}</p></div>
+              </div>
+            ) : null}
+
+            {selectedDocumentDetail.type === "Receipt" ? (
+              <div className="grid gap-3 sm:grid-cols-4">
+                <div className="rounded-lg border border-border p-3"><p className="text-xs text-muted-foreground">Receipt Date</p><p className="mt-1 font-medium">{formatDate(selectedDocumentDetail.record.receiptDate)}</p></div>
+                <div className="rounded-lg border border-border p-3"><p className="text-xs text-muted-foreground">Amount</p><Amount value={selectedDocumentDetail.record.amount} className="mt-1 font-semibold" /></div>
+                <div className="rounded-lg border border-border p-3"><p className="text-xs text-muted-foreground">Status</p><div className="mt-1"><Badge variant={selectedDocumentDetail.record.status === "posted" ? "secondary" : "outline"}>{titleCase(selectedDocumentDetail.record.status)}</Badge></div></div>
+                <div className="rounded-lg border border-border p-3"><p className="text-xs text-muted-foreground">Invoice</p><p className="mt-1 font-mono text-xs">{invoices.find((invoice) => invoice.id === selectedDocumentDetail.record.invoiceId)?.number ?? selectedDocumentDetail.record.invoiceId ?? "-"}</p></div>
+                <div className="rounded-lg border border-border p-3 sm:col-span-2"><p className="text-xs text-muted-foreground">Journal Entry</p><p className="mt-1 break-all font-mono text-xs">{selectedDocumentDetail.record.journalEntryId ?? "-"}</p></div>
+                <div className="rounded-lg border border-border p-3 sm:col-span-2"><p className="text-xs text-muted-foreground">Receipt ID</p><p className="mt-1 break-all font-mono text-xs">{selectedDocumentDetail.record.id}</p></div>
+              </div>
+            ) : null}
+
+            {selectedDocumentDetail.type === "Payment Voucher" ? (
+              <div className="grid gap-3 sm:grid-cols-4">
+                <div className="rounded-lg border border-border p-3"><p className="text-xs text-muted-foreground">Payment Date</p><p className="mt-1 font-medium">{formatDate(selectedDocumentDetail.record.paymentDate)}</p></div>
+                <div className="rounded-lg border border-border p-3"><p className="text-xs text-muted-foreground">Amount</p><Amount value={selectedDocumentDetail.record.amount} className="mt-1 font-semibold" /></div>
+                <div className="rounded-lg border border-border p-3"><p className="text-xs text-muted-foreground">Status</p><div className="mt-1"><Badge variant={selectedDocumentDetail.record.status === "posted" ? "secondary" : "outline"}>{titleCase(selectedDocumentDetail.record.status)}</Badge></div></div>
+                <div className="rounded-lg border border-border p-3"><p className="text-xs text-muted-foreground">Vendor Bill</p><p className="mt-1 font-mono text-xs">{vendorBills.find((bill) => bill.id === selectedDocumentDetail.record.vendorBillId)?.billNumber ?? selectedDocumentDetail.record.vendorBillId ?? "-"}</p></div>
+                <div className="rounded-lg border border-border p-3 sm:col-span-2"><p className="text-xs text-muted-foreground">Journal Entry</p><p className="mt-1 break-all font-mono text-xs">{selectedDocumentDetail.record.journalEntryId ?? "-"}</p></div>
+                <div className="rounded-lg border border-border p-3 sm:col-span-2"><p className="text-xs text-muted-foreground">Voucher ID</p><p className="mt-1 break-all font-mono text-xs">{selectedDocumentDetail.record.id}</p></div>
+              </div>
+            ) : null}
+
+            {selectedDocumentDetail.type === "Workflow Document" ? (
+              <>
+                <div className="grid gap-3 sm:grid-cols-4">
+                  <div className="rounded-lg border border-border p-3"><p className="text-xs text-muted-foreground">Type</p><p className="mt-1 font-medium">{documentTypeLabel(selectedDocumentDetail.record.documentType)}</p></div>
+                  <div className="rounded-lg border border-border p-3"><p className="text-xs text-muted-foreground">Party</p><p className="mt-1 font-medium">{contactName(selectedDocumentDetail.record.contactId)}</p></div>
+                  <div className="rounded-lg border border-border p-3"><p className="text-xs text-muted-foreground">Date</p><p className="mt-1 font-medium">{formatDate(selectedDocumentDetail.record.documentDate)}</p></div>
+                  <div className="rounded-lg border border-border p-3"><p className="text-xs text-muted-foreground">Total</p><Amount value={selectedDocumentDetail.record.totalAmount} className="mt-1 font-semibold" /></div>
+                </div>
+                <Card className="overflow-hidden py-0">
+                  <Table>
+                    <TableHeader><TableRow><TableHead>Description</TableHead><TableHead className="text-right">Qty</TableHead><TableHead className="text-right">Unit Price</TableHead><TableHead className="text-right">Tax</TableHead><TableHead className="text-right">Line Total</TableHead></TableRow></TableHeader>
+                    <TableBody>{selectedDocumentDetail.record.lines.map((line) => <TableRow key={line.id}><TableCell>{line.description}</TableCell><TableCell className="text-right">{line.quantity}</TableCell><TableCell className="text-right"><Amount value={line.unitPrice} /></TableCell><TableCell className="text-right"><Amount value={line.taxAmount} /></TableCell><TableCell className="text-right"><Amount value={line.lineTotal} /></TableCell></TableRow>)}</TableBody>
+                  </Table>
+                </Card>
+              </>
+            ) : null}
           </DialogContent>
         ) : null}
       </Dialog>

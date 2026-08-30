@@ -79,6 +79,7 @@ interface Store {
   setWorkflowDocumentStatus: (id: string, status: string, confirmation: ConfirmationMetadata) => void
   setInvoiceStatus: (id: string, status: Invoice["status"], confirmation: ConfirmationMetadata) => void
   setVendorBillStatus: (id: string, status: VendorBill["status"], confirmation: ConfirmationMetadata) => void
+  refreshAccountingData: () => Promise<void>
   loadDemoData: () => Promise<void>
   resetSystemData: () => Promise<void>
   // derived
@@ -431,6 +432,7 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
     setWorkflowDocumentStatus,
     setInvoiceStatus,
     setVendorBillStatus,
+    refreshAccountingData: refresh,
     loadDemoData: loadDemoDataAction,
     resetSystemData: resetSystemDataAction,
     accountName,

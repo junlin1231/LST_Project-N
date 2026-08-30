@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
-import { createDocumentUpload, listDocuments } from "@/lib/server/document-repository"
+import { createDocumentUpload, getDocumentDetailByJournalEntryId, listDocuments } from "@/lib/server/document-repository"
 
 export const runtime = "nodejs"
 
@@ -8,8 +8,12 @@ function errorResponse(error: unknown) {
   return NextResponse.json({ error: message }, { status: 500 })
 }
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
+    const journalEntryId = request.nextUrl.searchParams.get("journalEntryId")
+    if (journalEntryId) {
+      return NextResponse.json(await getDocumentDetailByJournalEntryId(journalEntryId))
+    }
     return NextResponse.json(await listDocuments())
   } catch (error) {
     return errorResponse(error)

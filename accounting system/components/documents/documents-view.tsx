@@ -151,7 +151,7 @@ function recalculateFields(fields: NormalizedDocumentFields): NormalizedDocument
 }
 
 export function DocumentsView() {
-  const { accounts, accountName } = useAccounting()
+  const { accounts, accountName, refreshAccountingData } = useAccounting()
   const [documents, setDocuments] = useState<OcrDocument[]>([])
   const [selected, setSelected] = useState<OcrDocumentDetail | null>(null)
   const [category, setCategory] = useState<DocumentCategory>("unknown")
@@ -201,7 +201,8 @@ export function DocumentsView() {
   }
 
   useEffect(() => {
-    void loadDocuments().catch((error) => setNotice({ type: "error", message: error.message }))
+    const requestedDocumentId = new URLSearchParams(window.location.search).get("documentId")
+    void loadDocuments(requestedDocumentId).catch((error) => setNotice({ type: "error", message: error.message }))
   }, [])
 
   useEffect(() => {
@@ -310,6 +311,9 @@ export function DocumentsView() {
         await loadDocuments(displayedDetail.id)
       } else {
         await loadDocuments(selectedIdRef.current)
+      }
+      if (path === "post") {
+        await refreshAccountingData()
       }
       const message = splitDocuments?.length
         ? `${splitDocuments.length} transactions detected, separated, and scanned individually.${skippedPostedDocumentCount ? ` ${skippedPostedDocumentCount} posted transaction${skippedPostedDocumentCount === 1 ? " was" : "s were"} left unchanged.` : ""} Showing transaction 1.`
