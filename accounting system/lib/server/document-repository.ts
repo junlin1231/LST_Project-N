@@ -2,6 +2,7 @@ import "server-only"
 
 import { createHash, randomUUID } from "node:crypto"
 import fs from "node:fs/promises"
+import os from "node:os"
 import path from "node:path"
 import type {
   DocumentAccountingDraft,
@@ -10,6 +11,7 @@ import type {
   DocumentExtraction,
   DocumentProcessingStatus,
   DocumentSourceChannel,
+  BankStatementTransaction,
   NormalizedDocumentFields,
   OcrDocument,
   OcrDocumentDetail,
@@ -22,8 +24,10 @@ import { isJournalEntryBalanced } from "@/lib/accounting/calculations"
 import { DEFAULT_COMPANY_ID, DEFAULT_USER_ID, insertJournalEntry } from "./accounting-repository"
 import { ensureDatabaseReady, query, transaction, type DbExecutor } from "./db"
 import { categorizationAdapter } from "./categorization-adapter"
-import { ocrAdapter } from "./ocr-adapter"
-import { splitImageIntoReceipts } from "./receipt-splitter"
+import { ocrAdapter, type OcrResult } from "./ocr-adapter"
+import { getActiveRuleConfig } from "./accounting-rule-service"
+import { countPdfPages, splitPdfIntoPageImages } from "./pdf-splitter"
+import { splitImageIntoReceipts, splitImageIntoVerticalSections } from "./receipt-splitter"
 import { documentStorageRoot, resolveStoredDocumentPath } from "./document-storage"
 
 const MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024
@@ -263,7 +267,7 @@ export async function listDocuments(): Promise<OcrDocument[]> {
        d.processing_status, d.review_status, d.source_channel, d.uploaded_at, d.updated_at
      FROM documents d
      WHERE d.company_id = $1
-       -- Keep split-source uploads for audit and rescans, but show only their receipt children in the working list.
+       -- Keep split-source uploads for audit and rescans, but show only their split children in the working list.
        AND (d.parent_document_id IS NOT NULL OR NOT EXISTS (
          SELECT 1 FROM documents child
          WHERE child.company_id = d.company_id AND child.parent_document_id = d.id
@@ -380,45 +384,66 @@ function needsReview(ocrConfidence: number | undefined, categoryConfidence: numb
   return Array.from(new Set(warnings))
 }
 
+function looksLikeBankStatementOcr(ocr: OcrResult, originalFilename: string) {
+  const text = `${originalFilename}\n${ocr.rawText}`.toLowerCase()
+  return !!ocr.fields.bankTransactions?.length
+    || text.includes("bank statement")
+    || text.includes("account details and transaction history")
+    || text.includes("cimb")
+    || text.includes("cimbclicks")
+    || text.includes("cimb clicks")
+    || (text.includes("money in") && text.includes("money out") && text.includes("balance"))
+}
+
+function looksLikeBankStatementFilename(filename: string) {
+  return /\b(bank|statement|cimb|maybank|rhb|ambank|ocbc|uob)\b/i.test(filename)
+    || /public[-_\s]*bank/i.test(filename)
+    || /hong[-_\s]*leong/i.test(filename)
+}
+
+async function storeOcrDraftForDocument(row: DocumentRow, ocr: OcrResult) {
+  const category = await categorizationAdapter.categorize({ rawText: ocr.rawText, extractedFields: ocr.fields })
+  const warnings = needsReview(ocr.confidence, category.confidence, category.category, category.normalizedFields, category.suggestedJournalLines)
+  const normalizedFields = { ...category.normalizedFields, warnings }
+  const draftId = `draft-${randomUUID()}`
+  const confirmationId = `confirm-${randomUUID()}`
+
+  await transaction(async (client) => {
+    await updateDocumentStatus(client, row.id, "needs_review", "pending")
+    await exec(
+      client,
+      `INSERT INTO document_extractions (id, company_id, document_id, raw_text, extracted_fields, ocr_engine, ocr_confidence, status)
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, 'completed')`,
+      [`ocr-${randomUUID()}`, DEFAULT_COMPANY_ID, row.id, ocr.rawText, JSON.stringify(ocr.fields), ocr.engine, ocr.confidence ?? null],
+    )
+    await exec(
+      client,
+      `INSERT INTO document_categories (id, company_id, document_id, category, confidence, reason, model_name, model_version, raw_output, requires_review)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, TRUE)`,
+      [`cat-${randomUUID()}`, DEFAULT_COMPANY_ID, row.id, category.category, category.confidence, category.reason, category.modelName, category.modelVersion ?? null, JSON.stringify(category.rawOutput)],
+    )
+    await exec(
+      client,
+      `INSERT INTO document_accounting_drafts (id, company_id, document_id, draft_type, normalized_fields, suggested_journal_lines, status)
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, 'draft')`,
+      [draftId, DEFAULT_COMPANY_ID, row.id, category.category, JSON.stringify(normalizedFields), JSON.stringify(category.suggestedJournalLines)],
+    )
+    await exec(
+      client,
+      `INSERT INTO posting_confirmations (id, company_id, document_id, draft_id, status, preview_snapshot)
+       VALUES ($1, $2, $3, $4, 'pending', $5::jsonb)`,
+      [confirmationId, DEFAULT_COMPANY_ID, row.id, draftId, JSON.stringify({ normalizedFields, suggestedJournalLines: category.suggestedJournalLines })],
+    )
+  })
+}
+
 async function processOneDocument(id: string) {
   const row = await getDocumentRow(id)
   if (!row) throw new Error("Document was not found.")
   try {
     await query("UPDATE documents SET processing_status = 'ocr_processing', updated_at = NOW() WHERE id = $1 AND company_id = $2", [id, DEFAULT_COMPANY_ID])
     const ocr = await ocrAdapter.extract({ filePath: resolveStoredDocumentPath(row.storage_path), mimeType: row.mime_type, originalFilename: row.original_filename })
-    const category = await categorizationAdapter.categorize({ rawText: ocr.rawText, extractedFields: ocr.fields })
-    const warnings = needsReview(ocr.confidence, category.confidence, category.category, category.normalizedFields, category.suggestedJournalLines)
-    const normalizedFields = { ...category.normalizedFields, warnings }
-    const draftId = `draft-${randomUUID()}`
-    const confirmationId = `confirm-${randomUUID()}`
-
-    await transaction(async (client) => {
-      await updateDocumentStatus(client, id, "needs_review", "pending")
-      await exec(
-        client,
-        `INSERT INTO document_extractions (id, company_id, document_id, raw_text, extracted_fields, ocr_engine, ocr_confidence, status)
-         VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, 'completed')`,
-        [`ocr-${randomUUID()}`, DEFAULT_COMPANY_ID, id, ocr.rawText, JSON.stringify(ocr.fields), ocr.engine, ocr.confidence ?? null],
-      )
-      await exec(
-        client,
-        `INSERT INTO document_categories (id, company_id, document_id, category, confidence, reason, model_name, model_version, raw_output, requires_review)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, TRUE)`,
-        [`cat-${randomUUID()}`, DEFAULT_COMPANY_ID, id, category.category, category.confidence, category.reason, category.modelName, category.modelVersion ?? null, JSON.stringify(category.rawOutput)],
-      )
-      await exec(
-        client,
-        `INSERT INTO document_accounting_drafts (id, company_id, document_id, draft_type, normalized_fields, suggested_journal_lines, status)
-         VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, 'draft')`,
-        [draftId, DEFAULT_COMPANY_ID, id, category.category, JSON.stringify(normalizedFields), JSON.stringify(category.suggestedJournalLines)],
-      )
-      await exec(
-        client,
-        `INSERT INTO posting_confirmations (id, company_id, document_id, draft_id, status, preview_snapshot)
-         VALUES ($1, $2, $3, $4, 'pending', $5::jsonb)`,
-        [confirmationId, DEFAULT_COMPANY_ID, id, draftId, JSON.stringify({ normalizedFields, suggestedJournalLines: category.suggestedJournalLines })],
-      )
-    })
+    await storeOcrDraftForDocument(row, ocr)
   } catch (error) {
     await transaction(async (client) => {
       await updateDocumentStatus(client, id, "ocr_failed", "pending")
@@ -437,13 +462,14 @@ async function processOneDocument(id: string) {
 
 interface ChildDocumentRow {
   id: string
+  storage_path: string
   processing_status: DocumentProcessingStatus
   review_status: PostingConfirmationStatus
 }
 
 async function childDocumentRows(parentDocumentId: string) {
   const result = await query<ChildDocumentRow>(
-    `SELECT id, processing_status, review_status
+    `SELECT id, storage_path, processing_status, review_status
      FROM documents
      WHERE company_id = $1 AND parent_document_id = $2
      ORDER BY receipt_index ASC, uploaded_at ASC`,
@@ -452,22 +478,52 @@ async function childDocumentRows(parentDocumentId: string) {
   return result.rows
 }
 
-async function recordSplitParent(id: string, receiptCount: number) {
+async function deleteUnpostedChildDocuments(parentDocumentId: string, children: ChildDocumentRow[]) {
+  const posted = children.filter((child) => child.processing_status === "posted" || child.review_status === "posted")
+  if (posted.length > 0) {
+    throw new Error("This bank statement has posted split transactions. Reverse or review those entries before rescanning it as one statement.")
+  }
+
+  await transaction(async (client) => {
+    await exec(
+      client,
+      `DELETE FROM documents
+       WHERE company_id = $1 AND parent_document_id = $2`,
+      [DEFAULT_COMPANY_ID, parentDocumentId],
+    )
+  })
+
+  await Promise.all(children.map((child) => fs.unlink(resolveStoredDocumentPath(child.storage_path)).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== "ENOENT") throw error
+  })))
+}
+
+async function recordSplitParent(id: string, transactionCount: number, source: "image_regions" | "pdf_pages") {
   await transaction(async (client) => {
     await updateDocumentStatus(client, id, "needs_review", "pending")
     await exec(
       client,
       `INSERT INTO document_extractions (id, company_id, document_id, raw_text, extracted_fields, ocr_engine, status)
-       VALUES ($1, $2, $3, $4, $5::jsonb, 'receipt-region-detector', 'completed')`,
+       VALUES ($1, $2, $3, $4, $5::jsonb, 'transaction-splitter', 'completed')`,
       [
         `ocr-${randomUUID()}`,
         DEFAULT_COMPANY_ID,
         id,
-        `Multiple receipts detected. ${receiptCount} separate receipt documents were created and scanned.`,
-        JSON.stringify({ receiptCount, splitIntoSeparateDocuments: true }),
+        `Multiple transactions detected. ${transactionCount} separate documents were created and scanned.`,
+        JSON.stringify({ transactionCount, splitSource: source, splitIntoSeparateDocuments: true }),
       ],
     )
   })
+}
+
+function countLikelyTransactionBlocks(rawText: string) {
+  const patterns = [
+    /\bNO\.?\s*[:#-]?\s*[A-Z0-9/-]{3,}/gi,
+    /\b(?:DATE|TARIKH)\s*[:#-]?\s*\d{1,2}[/-]\d{1,2}[/-]\d{2,4}/gi,
+    /\bTOTAL(?:\s+JUMLAH)?\s*(?:RM|MYR)?\s*[:#-]?\s*\d{1,7}(?:,\d{3})*(?:\.\d{1,2})?/gi,
+  ]
+  const counts = patterns.map((pattern) => rawText.match(pattern)?.length ?? 0).filter((count) => count > 1)
+  return Math.max(1, Math.min(10, counts.length ? Math.max(...counts) : 1))
 }
 
 export interface DocumentProcessResult {
@@ -484,39 +540,102 @@ export async function processDocument(id: string): Promise<DocumentProcessResult
     throw new Error("Posted documents cannot be rescanned.")
   }
 
-  // Child documents are already cropped. Re-scanning one must never create another generation of children.
-  if (row.parent_document_id || !row.mime_type.startsWith("image/")) {
+  // Child documents are already split. Re-scanning one must never create another generation of children.
+  if (row.parent_document_id) {
     return { detail: await processOneDocument(id) }
   }
 
+  const baseName = path.basename(row.original_filename, path.extname(row.original_filename)) || "document"
+  const filePath = resolveStoredDocumentPath(row.storage_path)
   let children = await childDocumentRows(id)
-  if (children.length === 0) {
-    const regions = await ocrAdapter.detectReceiptRegions({
-      filePath: resolveStoredDocumentPath(row.storage_path),
-      mimeType: row.mime_type,
-      originalFilename: row.original_filename,
-    })
-    if (regions.length < 2) return { detail: await processOneDocument(id) }
+  if (row.mime_type === "application/pdf" && looksLikeBankStatementFilename(row.original_filename)) {
+    const preflightOcr = await ocrAdapter.extract({ filePath, mimeType: row.mime_type, originalFilename: row.original_filename })
+    if (looksLikeBankStatementOcr(preflightOcr, row.original_filename)) {
+      if (children.length > 0) {
+        await deleteUnpostedChildDocuments(id, children)
+      }
+      await storeOcrDraftForDocument(row, preflightOcr)
+      return { detail: await getDocumentDetail(id) }
+    }
+  }
 
-    await query("UPDATE documents SET processing_status = 'ocr_processing', updated_at = NOW() WHERE id = $1 AND company_id = $2", [id, DEFAULT_COMPANY_ID])
-    const crops = await splitImageIntoReceipts({ filePath: resolveStoredDocumentPath(row.storage_path), regions })
-    const baseName = path.basename(row.original_filename, path.extname(row.original_filename)) || "receipt"
-    await Promise.all(crops.map((bytes: Buffer, index: number) => createDocumentUpload({
-      filename: `${baseName}-receipt-${String(index + 1).padStart(2, "0")}.jpg`,
-      mimeType: "image/jpeg",
-      bytes,
-      sourceChannel: row.source_channel,
-      parentDocumentId: id,
-      receiptIndex: index + 1,
-    })))
+  if (children.length === 0) {
+    if (row.mime_type === "application/pdf") {
+      const pageCount = await countPdfPages(filePath)
+      if (pageCount < 1) return { detail: await processOneDocument(id) }
+
+      await query("UPDATE documents SET processing_status = 'ocr_processing', updated_at = NOW() WHERE id = $1 AND company_id = $2", [id, DEFAULT_COMPANY_ID])
+      const pages = await splitPdfIntoPageImages({ filePath })
+      const pageTransactions: Array<{ pageNumber: number; transactionNumber: number; bytes: Buffer }> = []
+      const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ocr-pdf-page-"))
+      try {
+        for (const page of pages) {
+          const pagePath = path.join(tempDir, `page-${page.pageNumber}.png`)
+          await fs.writeFile(pagePath, page.bytes)
+          const regions = await ocrAdapter.detectReceiptRegions({
+            filePath: pagePath,
+            mimeType: "image/png",
+            originalFilename: `${row.original_filename} page ${page.pageNumber}`,
+          })
+          if (regions.length > 1) {
+            const crops = await splitImageIntoReceipts({ filePath: pagePath, regions })
+            pageTransactions.push(...crops.map((bytes, index) => ({ pageNumber: page.pageNumber, transactionNumber: index + 1, bytes })))
+          } else {
+            pageTransactions.push({ pageNumber: page.pageNumber, transactionNumber: 1, bytes: page.bytes })
+          }
+        }
+
+        if (pageTransactions.length < 2 && pages.length === 1) {
+          const pagePath = path.join(tempDir, "page-1.png")
+          const ocr = await ocrAdapter.extract({ filePath: pagePath, mimeType: "image/png", originalFilename: row.original_filename })
+          const transactionCount = countLikelyTransactionBlocks(ocr.rawText)
+          if (transactionCount > 1) {
+            const sections = await splitImageIntoVerticalSections({ filePath: pagePath, sections: transactionCount })
+            pageTransactions.splice(0, pageTransactions.length, ...sections.map((bytes, index) => ({ pageNumber: 1, transactionNumber: index + 1, bytes })))
+          }
+        }
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true }).catch(() => undefined)
+      }
+      if (pageTransactions.length < 2) return { detail: await processOneDocument(id) }
+
+      await Promise.all(pageTransactions.map((transaction, index) => createDocumentUpload({
+        filename: `${baseName}-transaction-${String(index + 1).padStart(2, "0")}.png`,
+        mimeType: "image/png",
+        bytes: transaction.bytes,
+        sourceChannel: row.source_channel,
+        parentDocumentId: id,
+        receiptIndex: index + 1,
+      })))
+    } else if (row.mime_type.startsWith("image/")) {
+      const regions = await ocrAdapter.detectReceiptRegions({
+        filePath,
+        mimeType: row.mime_type,
+        originalFilename: row.original_filename,
+      })
+      if (regions.length < 2) return { detail: await processOneDocument(id) }
+
+      await query("UPDATE documents SET processing_status = 'ocr_processing', updated_at = NOW() WHERE id = $1 AND company_id = $2", [id, DEFAULT_COMPANY_ID])
+      const crops = await splitImageIntoReceipts({ filePath, regions })
+      await Promise.all(crops.map((bytes: Buffer, index: number) => createDocumentUpload({
+        filename: `${baseName}-transaction-${String(index + 1).padStart(2, "0")}.jpg`,
+        mimeType: "image/jpeg",
+        bytes,
+        sourceChannel: row.source_channel,
+        parentDocumentId: id,
+        receiptIndex: index + 1,
+      })))
+    } else {
+      return { detail: await processOneDocument(id) }
+    }
     children = await childDocumentRows(id)
   }
 
-  // A parent rescan reuses its existing cropped files and creates fresh OCR drafts for each receipt.
+  // A parent rescan reuses its existing split files and creates fresh OCR drafts for each transaction.
   const childrenToRescan = children.filter((child) => child.processing_status !== "posted" && child.review_status !== "posted")
   const skippedPostedDocumentCount = children.length - childrenToRescan.length
   await Promise.allSettled(childrenToRescan.map((child) => processOneDocument(child.id)))
-  await recordSplitParent(id, children.length)
+  await recordSplitParent(id, children.length, row.mime_type === "application/pdf" ? "pdf_pages" : "image_regions")
   const splitDocuments = await Promise.all(children.map((child) => getDocumentDetail(child.id)))
   return { detail: await getDocumentDetail(id), splitDocuments, skippedPostedDocumentCount }
 }
@@ -526,11 +645,32 @@ function validateCategory(value: unknown): DocumentCategory {
   throw new Error("Document category is not valid.")
 }
 
+function validateCurrency(value: unknown) {
+  const currency = String(value ?? "").trim().toUpperCase()
+  return /^[A-Z]{3}$/.test(currency) ? currency : "MYR"
+}
+
+function validatePaymentMethod(value: unknown) {
+  const text = String(value ?? "").trim().toLowerCase().replace(/[_-]+/g, " ")
+  if (!text) return ""
+  if (text.includes("cash")) return "cash"
+  if (text.includes("online")) return "online_banking"
+  if (text.includes("bank") || text.includes("transfer") || text.includes("duitnow") || text.includes("fpx")) return "bank_transfer"
+  if (text.includes("credit")) return "credit_card"
+  if (text.includes("debit")) return "debit_card"
+  if (text.includes("wallet") || text.includes("touch") || text.includes("tng") || text.includes("grabpay") || text.includes("boost")) return "e_wallet"
+  if (text.includes("cheque") || text.includes("check")) return "cheque"
+  if (text.includes("card")) return "credit_card"
+  if (text === "other") return "other"
+  return "other"
+}
+
 function validateFields(input: NormalizedDocumentFields): NormalizedDocumentFields {
   const subtotal = Number(input.subtotal)
   const otherCharges = Number(input.otherCharges ?? 0)
   const taxAmount = Number(input.taxAmount)
   const totalAmount = Number(input.totalAmount)
+  const bankTransactions = validateBankTransactions(input.bankTransactions ?? [])
   const lineItems = (input.lineItems ?? []).map((line) => ({
     description: String(line.description ?? "").trim(),
     quantity: Number(line.quantity),
@@ -541,7 +681,7 @@ function validateFields(input: NormalizedDocumentFields): NormalizedDocumentFiel
   }))
   const warnings: string[] = []
   if (!/^\d{4}-\d{2}-\d{2}$/.test(input.documentDate)) warnings.push("Document date is required.")
-  if (!Number.isFinite(totalAmount) || totalAmount <= 0) warnings.push("Total amount must be greater than zero.")
+  if (bankTransactions.length === 0 && (!Number.isFinite(totalAmount) || totalAmount <= 0)) warnings.push("Total amount must be greater than zero.")
   if (!Number.isFinite(otherCharges)) warnings.push("Other charges must be a valid amount.")
   if (lineItems.some((line) => !line.description)) warnings.push("Every line needs a description.")
   if (lineItems.some((line) => !Number.isFinite(line.quantity) || line.quantity <= 0)) warnings.push("Line quantity must be greater than zero.")
@@ -553,7 +693,7 @@ function validateFields(input: NormalizedDocumentFields): NormalizedDocumentFiel
     documentDate: input.documentDate,
     dueDate: input.dueDate ?? "",
     documentNumber: input.documentNumber ?? "",
-    currency: input.currency || "MYR",
+    currency: validateCurrency(input.currency),
     vendorName: input.vendorName ?? "",
     clientName: input.clientName ?? "",
     taxId: input.taxId ?? "",
@@ -561,10 +701,31 @@ function validateFields(input: NormalizedDocumentFields): NormalizedDocumentFiel
     otherCharges,
     taxAmount,
     totalAmount,
-    paymentMethod: input.paymentMethod ?? "",
+    paymentMethod: validatePaymentMethod(input.paymentMethod),
     lineItems,
+    bankTransactions,
     warnings: Array.from(new Set(warnings)),
   }
+}
+
+function validateBankTransactions(input: BankStatementTransaction[]) {
+  return input.flatMap((transaction) => {
+    const date = String(transaction.date ?? "").trim()
+    const description = String(transaction.description ?? "").trim()
+    const reference = String(transaction.reference ?? "").trim()
+    const moneyIn = Number(transaction.moneyIn ?? 0)
+    const moneyOut = Number(transaction.moneyOut ?? 0)
+    const balance = transaction.balance === undefined ? undefined : Number(transaction.balance)
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !description || (!moneyIn && !moneyOut)) return []
+    return [{
+      date,
+      description,
+      reference,
+      moneyIn: Number((Number.isFinite(moneyIn) ? Math.max(0, moneyIn) : 0).toFixed(2)),
+      moneyOut: Number((Number.isFinite(moneyOut) ? Math.max(0, moneyOut) : 0).toFixed(2)),
+      balance: balance !== undefined && Number.isFinite(balance) ? Number(balance.toFixed(2)) : undefined,
+    }]
+  })
 }
 
 function validateJournalLines(lines: JournalLine[], date: string) {
@@ -572,6 +733,38 @@ function validateJournalLines(lines: JournalLine[], date: string) {
   const entry: JournalEntry = { id: "validation", date, description: "Validation", lines: normalized }
   if (normalized.length > 0 && !isJournalEntryBalanced(entry)) throw new Error("Suggested journal lines must be balanced before saving.")
   return normalized
+}
+
+function buildBankStatementJournalEntries(input: {
+  documentId: string
+  originalFilename: string
+  documentNumber?: string
+  bankTransactions: BankStatementTransaction[]
+  accounts: {
+    cashAccountId: string
+    revenueAccountId: string
+    expenseAccountId: string
+  }
+}) {
+  return input.bankTransactions.map((bankTransaction, index): JournalEntry => {
+    const amount = Number((bankTransaction.moneyIn > 0 ? bankTransaction.moneyIn : bankTransaction.moneyOut).toFixed(2))
+    const isMoneyIn = bankTransaction.moneyIn > 0
+    return {
+      id: `je-${randomUUID()}`,
+      date: bankTransaction.date,
+      reference: bankTransaction.reference || input.documentNumber || `${input.documentId}-${index + 1}`,
+      description: `Bank ${isMoneyIn ? "money in" : "money out"} - ${bankTransaction.description}`,
+      lines: isMoneyIn
+        ? [
+            { accountId: input.accounts.cashAccountId, debit: amount, credit: 0 },
+            { accountId: input.accounts.revenueAccountId, debit: 0, credit: amount },
+          ]
+        : [
+            { accountId: input.accounts.expenseAccountId, debit: amount, credit: 0 },
+            { accountId: input.accounts.cashAccountId, debit: 0, credit: amount },
+          ],
+    }
+  })
 }
 
 export async function updateDocumentDraft(id: string, input: { category: unknown; normalizedFields: NormalizedDocumentFields; suggestedJournalLines: JournalLine[] }) {
@@ -645,12 +838,37 @@ export async function postConfirmedDocument(id: string) {
   await ensureDemoCompany()
   const detail = await getDocumentDetail(id)
   if (!detail.draft || detail.draft.status !== "confirmed") throw new Error("Confirm the document before posting.")
-  const fields = detail.draft.normalizedFields
+  const fields = validateFields(detail.draft.normalizedFields)
+  const bankTransactions = validateBankTransactions(fields.bankTransactions ?? [])
   const lines = validateJournalLines(detail.draft.suggestedJournalLines, fields.documentDate)
-  if (lines.length === 0) throw new Error("Add balanced journal lines before posting.")
+  if (lines.length === 0 && bankTransactions.length === 0) throw new Error("Add balanced journal lines before posting.")
 
   await query("UPDATE documents SET processing_status = 'posting', updated_at = NOW() WHERE id = $1 AND company_id = $2", [id, DEFAULT_COMPANY_ID])
   try {
+    if (detail.draft.draftType === "bank_document" && bankTransactions.length > 0) {
+      const config = await getActiveRuleConfig()
+      const journalEntries = buildBankStatementJournalEntries({
+        documentId: id,
+        originalFilename: detail.originalFilename,
+        documentNumber: fields.documentNumber,
+        bankTransactions,
+        accounts: config,
+      })
+      await transaction(async (client) => {
+        for (const journalEntry of journalEntries) {
+          await insertJournalEntry(client, journalEntry)
+        }
+        await exec(client, "UPDATE document_accounting_drafts SET status = 'posted', journal_entry_id = $1, updated_at = NOW() WHERE id = $2 AND company_id = $3", [
+          journalEntries[0]?.id ?? null,
+          detail.draft?.id,
+          DEFAULT_COMPANY_ID,
+        ])
+        await exec(client, "UPDATE posting_confirmations SET status = 'posted' WHERE document_id = $1 AND company_id = $2", [id, DEFAULT_COMPANY_ID])
+        await updateDocumentStatus(client, id, "posted", "posted")
+      })
+      return { detail: await getDocumentDetail(id), journalEntries }
+    }
+
     const journalEntry: JournalEntry = {
       id: `je-${randomUUID()}`,
       date: fields.documentDate,

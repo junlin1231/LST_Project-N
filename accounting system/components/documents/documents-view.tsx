@@ -10,20 +10,48 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useAccounting } from "@/lib/accounting/store"
+import type { DocumentMasterDataOption } from "@/lib/accounting/document-master-data"
 import { DOCUMENT_CATEGORIES, type DocumentCategory, type NormalizedDocumentFields, type OcrDocument, type OcrDocumentDetail } from "@/lib/accounting/document-types"
 import type { JournalLine } from "@/lib/accounting/types"
 import { cn } from "@/lib/utils"
 
 type Notice = { type: "error" | "success"; message: string } | null
 type PostingTemplate = "expense_paid" | "vendor_bill" | "money_received" | "manual"
+type SplitTransactionSummary = {
+  id: string
+  label: string
+  category: DocumentCategory
+  status: string
+  party: string
+  date: string
+  amount: number
+}
 type DocumentActionResponse = OcrDocumentDetail | {
   detail: OcrDocumentDetail
   journalEntry?: { id: string }
+  journalEntries?: Array<{ id: string }>
   splitDocuments?: OcrDocumentDetail[]
   skippedPostedDocumentCount?: number
 }
 
 const DEFAULT_TAX_RATE = 0.06
+const CURRENCY_OPTIONS = ["MYR", "USD", "SGD", "CNY", "EUR", "GBP", "JPY", "AUD", "THB", "IDR"] as const
+const PAYMENT_METHOD_OPTIONS = [
+  { value: "", label: "Unpaid / Not Set" },
+  { value: "cash", label: "Cash" },
+  { value: "bank_transfer", label: "Bank Transfer" },
+  { value: "online_banking", label: "Online Banking" },
+  { value: "credit_card", label: "Credit Card" },
+  { value: "debit_card", label: "Debit Card" },
+  { value: "e_wallet", label: "E-Wallet" },
+  { value: "cheque", label: "Cheque" },
+  { value: "other", label: "Other Paid Method" },
+] as const
+
+const FALLBACK_MASTER_DATA_OPTIONS: DocumentMasterDataOption[] = [
+  ...CURRENCY_OPTIONS.map((value, index) => ({ id: `fallback-currency-${value}`, type: "currency" as const, value, label: value, isActive: true, sortOrder: index + 1 })),
+  ...PAYMENT_METHOD_OPTIONS.map((option, index) => ({ id: `fallback-payment-${option.value || "blank"}`, type: "payment_method" as const, value: option.value, label: option.label, isActive: true, sortOrder: index + 1 })),
+]
 
 const emptyFields: NormalizedDocumentFields = {
   documentDate: new Date().toISOString().slice(0, 10),
@@ -39,6 +67,7 @@ const emptyFields: NormalizedDocumentFields = {
   totalAmount: 0,
   paymentMethod: "",
   lineItems: [{ description: "", quantity: 1, unitPrice: 0, taxRate: 0, taxAmount: 0, lineTotal: 0 }],
+  bankTransactions: [],
   warnings: [],
 }
 
@@ -80,6 +109,25 @@ function splitTotalIncludingTax(total: number, taxRate = DEFAULT_TAX_RATE) {
   return { subtotal, taxAmount: Number((total - subtotal).toFixed(2)) }
 }
 
+function selectValueWithCurrent(options: readonly string[], value: string) {
+  const normalized = value.trim()
+  return normalized && !options.includes(normalized) ? [normalized, ...options] : options
+}
+
+function splitTransactionSummary(document: OcrDocumentDetail, index: number): SplitTransactionSummary {
+  const fields = document.draft?.normalizedFields ?? document.extraction?.extractedFields
+  const amount = Number(fields?.totalAmount ?? 0)
+  return {
+    id: document.id,
+    label: `Transaction ${document.receiptIndex ?? index + 1}`,
+    category: document.draft?.draftType ?? document.categoryResult?.category ?? "unknown",
+    status: document.reviewStatus,
+    party: fields?.vendorName || fields?.clientName || document.originalFilename,
+    date: fields?.documentDate || new Date(document.uploadedAt).toISOString().slice(0, 10),
+    amount: Number.isFinite(amount) ? amount : 0,
+  }
+}
+
 function recalculateFields(fields: NormalizedDocumentFields): NormalizedDocumentFields {
   const otherCharges = Number(fields.otherCharges) || 0
   const lineItems = fields.lineItems.map((line) => {
@@ -116,6 +164,8 @@ export function DocumentsView() {
   const [processingFilename, setProcessingFilename] = useState("")
   const [scanProgress, setScanProgress] = useState(0)
   const [notice, setNotice] = useState<Notice>(null)
+  const [splitTransactions, setSplitTransactions] = useState<SplitTransactionSummary[]>([])
+  const [masterDataOptions, setMasterDataOptions] = useState<DocumentMasterDataOption[]>(FALLBACK_MASTER_DATA_OPTIONS)
   const selectedIdRef = useRef<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const cameraInputRef = useRef<HTMLInputElement>(null)
@@ -126,6 +176,11 @@ export function DocumentsView() {
   const canPost = selected?.draft?.status === "confirmed" && selected.processingStatus !== "posted"
   const canDelete = !!selected && selected.processingStatus !== "posted" && selected.reviewStatus !== "posted"
   const warnings = fields.warnings ?? []
+  const currencyOptions = masterDataOptions.filter((option) => option.type === "currency" && option.isActive).map((option) => option.value)
+  const paymentMethodOptions = masterDataOptions.filter((option) => option.type === "payment_method" && option.isActive)
+  const bankTransactions = fields.bankTransactions ?? []
+  const bankMoneyIn = Number(bankTransactions.reduce((sum, transaction) => sum + Number(transaction.moneyIn), 0).toFixed(2))
+  const bankMoneyOut = Number(bankTransactions.reduce((sum, transaction) => sum + Number(transaction.moneyOut), 0).toFixed(2))
   const isScanning = activeAction === "process" && !!processingDocumentId
   const isSelectedScanning = isScanning && selected?.id === processingDocumentId
   const totalDebit = Number(lines.reduce((sum, line) => sum + Number(line.debit), 0).toFixed(2))
@@ -147,6 +202,13 @@ export function DocumentsView() {
 
   useEffect(() => {
     void loadDocuments().catch((error) => setNotice({ type: "error", message: error.message }))
+  }, [])
+
+  useEffect(() => {
+    fetch("/api/document-master-data", { cache: "no-store" })
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error(`Master data failed: ${response.status}`)))
+      .then((options: DocumentMasterDataOption[]) => setMasterDataOptions(options.length > 0 ? options : FALLBACK_MASTER_DATA_OPTIONS))
+      .catch(console.error)
   }, [])
 
   useEffect(() => {
@@ -192,6 +254,7 @@ export function DocumentsView() {
     if (!file) return
     setBusy(true)
     setNotice(null)
+    setSplitTransactions([])
     try {
       const formData = new FormData()
       formData.set("file", file)
@@ -217,7 +280,7 @@ export function DocumentsView() {
     const targetFilename = selected.originalFilename
     if (isOcrProcess && selected.extraction) {
       const rescanDescription = selected.childDocumentCount
-        ? `This will re-scan its ${selected.childDocumentCount} separated receipt files.`
+        ? `This will re-scan its ${selected.childDocumentCount} separated transaction files.`
         : "This will create a fresh OCR draft from the same stored file."
       const confirmed = window.confirm(`Re-scan ${selected.originalFilename}? ${rescanDescription}`)
       if (!confirmed) return
@@ -231,12 +294,15 @@ export function DocumentsView() {
     }
     setNotice(null)
     try {
-      const response = await fetch(`/api/documents/${targetId}/${path}`, options ?? { method: "POST" })
+      const response = await fetch(`/api/documents/${targetId}?action=${encodeURIComponent(path)}`, options ?? { method: "POST" })
       const body = await readJson<DocumentActionResponse>(response)
       const detail = "detail" in body && body.detail ? body.detail : body as OcrDocumentDetail
       const splitDocuments = "splitDocuments" in body ? body.splitDocuments : undefined
       const skippedPostedDocumentCount = "skippedPostedDocumentCount" in body ? body.skippedPostedDocumentCount ?? 0 : 0
       const displayedDetail = splitDocuments?.[0] ?? detail
+      if (isOcrProcess) {
+        setSplitTransactions(splitDocuments?.map(splitTransactionSummary) ?? [])
+      }
       if (isOcrProcess) setScanProgress(100)
       if (selectedIdRef.current === targetId) {
         selectedIdRef.current = displayedDetail.id
@@ -246,9 +312,11 @@ export function DocumentsView() {
         await loadDocuments(selectedIdRef.current)
       }
       const message = splitDocuments?.length
-        ? `${splitDocuments.length} receipts detected, separated, and scanned.${skippedPostedDocumentCount ? ` ${skippedPostedDocumentCount} posted receipt${skippedPostedDocumentCount === 1 ? " was" : "s were"} left unchanged.` : ""} Showing receipt 1.`
+        ? `${splitDocuments.length} transactions detected, separated, and scanned individually.${skippedPostedDocumentCount ? ` ${skippedPostedDocumentCount} posted transaction${skippedPostedDocumentCount === 1 ? " was" : "s were"} left unchanged.` : ""} Showing transaction 1.`
         : path === "post"
-          ? `Posted journal entry ${"journalEntry" in body ? body.journalEntry?.id ?? "" : ""}`.trim()
+          ? "journalEntries" in body && body.journalEntries?.length
+            ? `Posted ${body.journalEntries.length} journal entries.`
+            : `Posted journal entry ${"journalEntry" in body ? body.journalEntry?.id ?? "" : ""}`.trim()
           : "Document updated."
       setNotice({ type: "success", message })
     } catch (error) {
@@ -464,7 +532,7 @@ export function DocumentsView() {
         <div className="min-w-0">
           <p className="truncate text-sm font-medium">{document.originalFilename}</p>
           <p className="mt-1 text-xs text-muted-foreground">
-            {document.receiptIndex ? `Receipt ${document.receiptIndex} from a split upload` : document.childDocumentCount ? `Original upload · split into ${document.childDocumentCount} receipts` : document.sourceChannel === "camera_capture" ? "Photo capture" : "File upload"}
+            {document.receiptIndex ? `Transaction ${document.receiptIndex} from a split upload` : document.childDocumentCount ? `Original upload - split into ${document.childDocumentCount} transactions` : document.sourceChannel === "camera_capture" ? "Photo capture" : "File upload"}
           </p>
         </div>
         <Badge variant={statusVariant(document.processingStatus)}>{titleCase(document.processingStatus)}</Badge>
@@ -503,6 +571,40 @@ export function DocumentsView() {
 
         <div className="grid gap-4 lg:grid-cols-[20rem_minmax(0,1fr)]">
           <section className="space-y-2">
+            {splitTransactions.length > 0 ? (
+              <div className="rounded-md border border-primary/30 bg-primary/5 p-3">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <h3 className="text-sm font-semibold">Split transactions</h3>
+                  <Badge variant="secondary">{splitTransactions.length}</Badge>
+                </div>
+                <div className="space-y-2">
+                  {splitTransactions.map((transaction) => (
+                    <button
+                      key={transaction.id}
+                      type="button"
+                      onClick={() => void selectDocument(transaction.id)}
+                      className={cn(
+                        "w-full rounded-md border border-border bg-background p-3 text-left transition-colors hover:bg-muted/60",
+                        selected?.id === transaction.id && "border-primary bg-accent",
+                      )}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-medium">{transaction.label}</p>
+                          <p className="mt-1 truncate text-xs text-muted-foreground">{transaction.party}</p>
+                        </div>
+                        <Amount value={transaction.amount} className="shrink-0 text-sm font-semibold" />
+                      </div>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        <Badge variant="outline">{titleCase(transaction.category)}</Badge>
+                        <Badge variant={statusVariant(transaction.status)}>{titleCase(transaction.status)}</Badge>
+                        <span className="text-xs text-muted-foreground">{transaction.date}</span>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
             {documents.length === 0 ? (
               <div className="rounded-md border border-dashed border-border p-6 text-center text-sm text-muted-foreground">No documents yet.</div>
             ) : documentCards}
@@ -520,8 +622,8 @@ export function DocumentsView() {
                       <Badge variant={statusVariant(selected.processingStatus)}>{titleCase(selected.processingStatus)}</Badge>
                       <Badge variant="outline">{selected.categoryResult ? titleCase(selected.categoryResult.category) : "Not categorized"}</Badge>
                       {selected.categoryResult ? <Badge variant="outline">{Math.round(selected.categoryResult.confidence * 100)}% confidence</Badge> : null}
-                      {selected.receiptIndex ? <Badge variant="outline">Split receipt {selected.receiptIndex}</Badge> : null}
-                      {selected.childDocumentCount ? <Badge variant="outline">{selected.childDocumentCount} split receipts</Badge> : null}
+                      {selected.receiptIndex ? <Badge variant="outline">Split transaction {selected.receiptIndex}</Badge> : null}
+                      {selected.childDocumentCount ? <Badge variant="outline">{selected.childDocumentCount} split transactions</Badge> : null}
                     </div>
                   </div>
                   <div className="flex flex-wrap gap-2">
@@ -555,9 +657,10 @@ export function DocumentsView() {
                 {isScanning ? <ScanProgress progress={scanProgress} filename={processingFilename} /> : null}
 
                 <Tabs defaultValue="fields" className="flex-1 p-4">
-                  <TabsList className="grid h-auto w-full grid-cols-4">
+                  <TabsList className="grid h-auto w-full grid-cols-5">
                     <TabsTrigger value="file">File</TabsTrigger>
                     <TabsTrigger value="fields">Fields</TabsTrigger>
+                    <TabsTrigger value="bank">Bank Rows</TabsTrigger>
                     <TabsTrigger value="category">Category</TabsTrigger>
                     <TabsTrigger value="journal">Journal</TabsTrigger>
                   </TabsList>
@@ -566,14 +669,14 @@ export function DocumentsView() {
                     <div className="overflow-hidden rounded-md border border-border bg-muted/20">
                       {selected.mimeType.startsWith("image/") ? (
                         // eslint-disable-next-line @next/next/no-img-element
-                        <img src={`/api/documents/${selected.id}/file`} alt={selected.originalFilename} className="max-h-[28rem] w-full object-contain" />
+                        <img src={`/api/documents/${selected.id}?action=file`} alt={selected.originalFilename} className="max-h-[28rem] w-full object-contain" />
                       ) : selected.mimeType === "application/pdf" ? (
-                        <iframe title={selected.originalFilename} src={`/api/documents/${selected.id}/file`} className="h-[28rem] w-full" />
+                        <iframe title={selected.originalFilename} src={`/api/documents/${selected.id}?action=file`} className="h-[28rem] w-full" />
                       ) : (
                         <div className="p-6 text-sm text-muted-foreground">Preview is not available for this file type. Download the original file to inspect it.</div>
                       )}
                     </div>
-                    <Button variant="outline" onClick={() => window.open(`/api/documents/${selected.id}/file`, "_blank", "noreferrer")}>
+                    <Button variant="outline" onClick={() => window.open(`/api/documents/${selected.id}?action=file`, "_blank", "noreferrer")}>
                       Open Original
                     </Button>
                     {selected.extraction?.rawText ? (
@@ -592,8 +695,17 @@ export function DocumentsView() {
                       <Field label="Due Date"><Input type="date" value={fields.dueDate ?? ""} onChange={(event) => setFields((current) => ({ ...current, dueDate: event.target.value }))} /></Field>
                       <Field label="Document No."><Input value={fields.documentNumber ?? ""} onChange={(event) => setFields((current) => ({ ...current, documentNumber: event.target.value }))} /></Field>
                       <Field label="Vendor"><Input value={fields.vendorName ?? ""} onChange={(event) => setFields((current) => ({ ...current, vendorName: event.target.value }))} /></Field>
-                      <Field label="Currency"><Input value={fields.currency} onChange={(event) => setFields((current) => ({ ...current, currency: event.target.value.toUpperCase() }))} /></Field>
-                      <Field label="Payment Method"><Input value={fields.paymentMethod ?? ""} onChange={(event) => setFields((current) => ({ ...current, paymentMethod: event.target.value }))} /></Field>
+                      <Field label="Currency">
+                        <select className="h-10 rounded-md border border-input bg-background px-3 text-sm" value={fields.currency} onChange={(event) => setFields((current) => ({ ...current, currency: event.target.value }))}>
+                          {selectValueWithCurrent(currencyOptions, fields.currency).map((option) => <option key={option} value={option}>{option}</option>)}
+                        </select>
+                      </Field>
+                      <Field label="Payment Method">
+                        <select className="h-10 rounded-md border border-input bg-background px-3 text-sm" value={fields.paymentMethod ?? ""} onChange={(event) => setFields((current) => ({ ...current, paymentMethod: event.target.value }))}>
+                          {paymentMethodOptions.map((option) => <option key={option.id} value={option.value}>{option.label}</option>)}
+                          {fields.paymentMethod && !paymentMethodOptions.some((option) => option.value === fields.paymentMethod) ? <option value={fields.paymentMethod}>{titleCase(fields.paymentMethod)}</option> : null}
+                        </select>
+                      </Field>
                       <Field label="Other Charges"><Input inputMode="decimal" value={fields.otherCharges ?? 0} className="text-right" onChange={(event) => updateOtherCharges(toNumber(event.target.value))} /></Field>
                     </div>
 
@@ -625,6 +737,36 @@ export function DocumentsView() {
                           </div>
                         ))}
                       </div>
+                    </div>
+                  </TabsContent>
+
+                  <TabsContent value="bank" className="mt-4 space-y-4">
+                    <div className="grid gap-3 sm:grid-cols-3">
+                      <Metric label="Rows" value={String(bankTransactions.length)} />
+                      <Summary label="Money In" value={bankMoneyIn} />
+                      <Summary label="Money Out" value={bankMoneyOut} />
+                    </div>
+                    <div className="overflow-hidden rounded-md border border-border">
+                      <div className="hidden grid-cols-[7rem_minmax(14rem,1fr)_9rem_8rem_8rem_8rem] gap-2 border-b border-border bg-muted/40 px-3 py-2 text-xs font-medium text-muted-foreground lg:grid">
+                        <span>Date</span>
+                        <span>Description</span>
+                        <span>Reference</span>
+                        <span className="text-right">Money In</span>
+                        <span className="text-right">Money Out</span>
+                        <span className="text-right">Balance</span>
+                      </div>
+                      {bankTransactions.length === 0 ? (
+                        <div className="p-4 text-sm text-muted-foreground">No bank statement rows captured.</div>
+                      ) : bankTransactions.map((transaction, index) => (
+                        <div key={`${transaction.date}-${index}`} className="grid gap-2 border-b border-border p-3 text-sm last:border-b-0 lg:grid-cols-[7rem_minmax(14rem,1fr)_9rem_8rem_8rem_8rem] lg:items-center">
+                          <span className="font-medium">{transaction.date}</span>
+                          <span className="min-w-0 break-words">{transaction.description}</span>
+                          <span className="min-w-0 break-words text-muted-foreground">{transaction.reference || "-"}</span>
+                          <span className="text-right"><Amount value={transaction.moneyIn} /></span>
+                          <span className="text-right"><Amount value={transaction.moneyOut} /></span>
+                          <span className="text-right text-muted-foreground">{transaction.balance === undefined ? "-" : <Amount value={transaction.balance} />}</span>
+                        </div>
+                      ))}
                     </div>
                   </TabsContent>
 
@@ -724,6 +866,15 @@ function Summary({ label, value }: { label: string; value: number }) {
     <div className="rounded-md border border-border p-3">
       <p className="text-xs text-muted-foreground">{label}</p>
       <Amount value={value} className="mt-1 font-semibold" />
+    </div>
+  )
+}
+
+function Metric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md border border-border p-3">
+      <p className="text-xs text-muted-foreground">{label}</p>
+      <p className="mt-1 font-semibold tabular-nums">{value}</p>
     </div>
   )
 }

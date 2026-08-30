@@ -36,12 +36,13 @@ function normalizeFields(fields: Partial<NormalizedDocumentFields>): NormalizedD
   const otherCharges = Number(fields.otherCharges ?? 0)
   const taxAmount = Number(fields.taxAmount ?? lineItems.reduce((sum, line) => sum + line.taxAmount, 0).toFixed(2))
   const totalAmount = Number(fields.totalAmount ?? (subtotal + otherCharges + taxAmount).toFixed(2))
+  const bankTransactions = fields.bankTransactions ?? []
 
   return {
     documentDate: fields.documentDate || new Date().toISOString().slice(0, 10),
     dueDate: fields.dueDate || "",
     documentNumber: fields.documentNumber || "",
-    currency: fields.currency || "MYR",
+    currency: normalizeCurrency(fields.currency),
     vendorName: fields.vendorName || "",
     clientName: fields.clientName || "",
     taxId: fields.taxId || "",
@@ -49,10 +50,31 @@ function normalizeFields(fields: Partial<NormalizedDocumentFields>): NormalizedD
     otherCharges,
     taxAmount,
     totalAmount,
-    paymentMethod: fields.paymentMethod || "",
+    paymentMethod: normalizePaymentMethod(fields.paymentMethod),
     lineItems,
+    bankTransactions,
     warnings: fields.warnings ?? [],
   }
+}
+
+function normalizeCurrency(value: unknown) {
+  const currency = String(value ?? "").trim().toUpperCase()
+  return /^[A-Z]{3}$/.test(currency) ? currency : "MYR"
+}
+
+function normalizePaymentMethod(value: unknown) {
+  const text = String(value ?? "").trim().toLowerCase().replace(/[_-]+/g, " ")
+  if (!text) return ""
+  if (text.includes("cash")) return "cash"
+  if (text.includes("online")) return "online_banking"
+  if (text.includes("bank") || text.includes("transfer") || text.includes("duitnow") || text.includes("fpx")) return "bank_transfer"
+  if (text.includes("credit")) return "credit_card"
+  if (text.includes("debit")) return "debit_card"
+  if (text.includes("wallet") || text.includes("touch") || text.includes("tng") || text.includes("grabpay") || text.includes("boost")) return "e_wallet"
+  if (text.includes("cheque") || text.includes("check")) return "cheque"
+  if (text.includes("card")) return "credit_card"
+  if (text === "other") return "other"
+  return "other"
 }
 
 function normalizeName(value: string) {
@@ -97,9 +119,13 @@ function detectTransferDirection(rawText: string, ownAliases: string[]): Transfe
 function inferCategory(text: string): CategoryDecision {
   const lower = text.toLowerCase()
   const direction = detectTransferDirection(text, getServerEnv().ownEntityNames)
+  const looksLikeStatement = lower.includes("bank statement")
+    || lower.includes("account details and transaction history")
+    || lower.includes("cimb")
+    || (lower.includes("money in") && lower.includes("money out") && lower.includes("balance"))
   const isSingleOutgoingTransfer = direction === "outgoing" || lower.includes("duitnow") || lower.includes("fund transfer") || lower.includes("transfer to") || lower.includes("transferred")
   const isIncomingTransfer = direction === "incoming" || lower.includes("received") || lower.includes("payment received") || lower.includes("credit advice") || lower.includes("receipt voucher")
-  const decision = lower.includes("bank statement")
+  const decision = looksLikeStatement
     ? { category: "bank_document" as const, confidence: 0.82, reason: "Detected bank statement terms." }
     : isIncomingTransfer
       ? { category: "receipt_income" as const, confidence: 0.86, reason: "Detected money received terms." }
@@ -140,7 +166,7 @@ function categoryValue(value: unknown): DocumentCategory | null {
 }
 
 function numberValue(value: unknown, fallback: number) {
-  const number = typeof value === "number" ? value : Number.parseFloat(String(value ?? ""))
+  const number = typeof value === "number" ? value : Number.parseFloat(String(value ?? "").replace(/,/g, "").replace(/^RM\s*/i, ""))
   return Number.isFinite(number) ? number : fallback
 }
 
@@ -149,11 +175,24 @@ function refineBankTransferCategory(decision: CategoryDecision, rawText: string)
   const env = getServerEnv()
   const direction = detectTransferDirection(rawText, env.ownEntityNames)
   const lower = rawText.toLowerCase()
-  const looksLikeStatement = lower.includes("bank statement") || lower.includes("opening balance") || lower.includes("closing balance")
+  const looksLikeStatement = lower.includes("bank statement")
+    || lower.includes("opening balance")
+    || lower.includes("closing balance")
+    || lower.includes("account details and transaction history")
+    || lower.includes("cimb")
+    || (lower.includes("money in") && lower.includes("money out") && lower.includes("balance"))
   const incoming = direction === "incoming" || lower.includes("received") || lower.includes("payment received") || lower.includes("credit advice")
   const outgoing = direction === "outgoing" || lower.includes("duitnow") || lower.includes("fund transfer") || lower.includes("transfer to") || lower.includes("transferred")
 
-  if (looksLikeStatement) return decision
+  if (looksLikeStatement) {
+    return {
+      ...decision,
+      category: "bank_document",
+      confidence: Math.max(decision.confidence, 0.82),
+      reason: `${decision.reason} Detected bank statement or transaction history terms.`,
+      rawOutput: { ...decision.rawOutput, localBankStatementSignal: true },
+    }
+  }
   if (incoming) {
     return {
       ...decision,
@@ -284,11 +323,14 @@ export class MockCategorizationAdapter implements CategorizationAdapter {
       console.error(error)
       return null
     }) ?? inferCategory(`${input.rawText}\n${fields.documentNumber ?? ""}\n${fields.lineItems.map((line) => line.description).join(" ")}`), input.rawText)
+    const category = fields.bankTransactions?.length ? "bank_document" : inferred.category
     const expenseDebit = Number(Math.max(0, fields.totalAmount - fields.taxAmount).toFixed(2))
-    const suggestedJournalLines: JournalLine[] = buildSuggestedJournalLines(inferred.category, fields, config, expenseDebit, input.rawText)
+    const suggestedJournalLines: JournalLine[] = buildSuggestedJournalLines(category, fields, config, expenseDebit, input.rawText)
 
     return {
       ...inferred,
+      category,
+      confidence: fields.bankTransactions?.length ? Math.max(inferred.confidence, 0.9) : inferred.confidence,
       normalizedFields: fields,
       suggestedJournalLines,
       rawOutput: inferred.rawOutput,

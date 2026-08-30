@@ -32,3 +32,23 @@ export async function splitImageIntoReceipts(input: { filePath: string; regions:
       .toBuffer()
   }))
 }
+
+export async function splitImageIntoVerticalSections(input: { filePath: string; sections: number }) {
+  if (!Number.isInteger(input.sections) || input.sections < 2) {
+    throw new Error("At least two image sections are required.")
+  }
+
+  const normalized = await sharp(input.filePath).rotate().jpeg({ quality: 94 }).toBuffer()
+  const metadata = await sharp(normalized).metadata()
+  if (!metadata.width || !metadata.height) throw new Error("Could not read the uploaded image dimensions.")
+
+  const sectionHeight = metadata.height / input.sections
+  return Promise.all(Array.from({ length: input.sections }, (_value, index) => {
+    const top = Math.floor(index * sectionHeight)
+    const bottom = index === input.sections - 1 ? metadata.height : Math.ceil((index + 1) * sectionHeight)
+    return sharp(normalized)
+      .extract({ left: 0, top, width: metadata.width, height: bottom - top })
+      .jpeg({ quality: 94 })
+      .toBuffer()
+  }))
+}

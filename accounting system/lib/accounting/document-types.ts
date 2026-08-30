@@ -49,6 +49,15 @@ export interface OcrLineItem {
   lineTotal: number
 }
 
+export interface BankStatementTransaction {
+  date: string
+  description: string
+  reference?: string
+  moneyIn: number
+  moneyOut: number
+  balance?: number
+}
+
 export interface NormalizedDocumentFields {
   documentDate: string
   dueDate?: string
@@ -63,6 +72,7 @@ export interface NormalizedDocumentFields {
   totalAmount: number
   paymentMethod?: string
   lineItems: OcrLineItem[]
+  bankTransactions?: BankStatementTransaction[]
   warnings: string[]
 }
 

@@ -6,12 +6,14 @@ import os from "node:os"
 import path from "node:path"
 import { promisify } from "node:util"
 import zlib from "node:zlib"
-import type { NormalizedDocumentFields } from "@/lib/accounting/document-types"
+import type { BankStatementTransaction, NormalizedDocumentFields } from "@/lib/accounting/document-types"
 import { chatCompletionsUrl, fetchAiJson } from "./ai-endpoint"
 import { getServerEnv } from "./env"
 import type { ReceiptRegion } from "./receipt-splitter"
 
 const execFileAsync = promisify(execFile)
+const BANK_OCR_PAGE_TIMEOUT_MS = 45_000
+const DOCUMENT_OCR_TIMEOUT_MS = 120_000
 
 export interface OcrResult {
   rawText: string
@@ -131,16 +133,16 @@ async function renderPdfPages(input: { filePath: string; maxPages?: number }) {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ocr-pdf-"))
   const outputPrefix = path.join(tempDir, "page")
   try {
-    await execFileAsync("pdftoppm", ["-png", "-r", "180", "-f", "1", "-l", String(input.maxPages ?? 3), input.filePath, outputPrefix], {
+    await execFileAsync("pdftoppm", ["-jpeg", "-jpegopt", "quality=72", "-r", "150", "-f", "1", "-l", String(input.maxPages ?? 10), input.filePath, outputPrefix], {
       timeout: 90_000,
-      maxBuffer: 1024 * 1024,
+      maxBuffer: 4 * 1024 * 1024,
     })
     const files = (await fs.readdir(tempDir))
-      .filter((file) => /^page-\d+\.png$/.test(file))
+      .filter((file) => /^page-\d+\.jpe?g$/.test(file))
       .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
 
     return Promise.all(files.map(async (file) => ({
-      mimeType: "image/png",
+      mimeType: "image/jpeg",
       bytes: await fs.readFile(path.join(tempDir, file)),
     })))
   } finally {
@@ -262,12 +264,12 @@ async function detectReceiptRegionsWithGemma(input: { filePath: string; mimeType
 }
 
 function numberValue(value: unknown, fallback = 0) {
-  const number = typeof value === "number" ? value : Number.parseFloat(String(value ?? ""))
+  const number = typeof value === "number" ? value : Number.parseFloat(String(value ?? "").replace(/,/g, "").replace(/^RM\s*/i, ""))
   return Number.isFinite(number) ? number : fallback
 }
 
 function optionalNumberValue(value: unknown) {
-  const number = typeof value === "number" ? value : Number.parseFloat(String(value ?? ""))
+  const number = typeof value === "number" ? value : Number.parseFloat(String(value ?? "").replace(/,/g, "").replace(/^RM\s*/i, ""))
   return Number.isFinite(number) ? number : 0
 }
 
@@ -280,12 +282,93 @@ function optionalStringValue(value: unknown, fallback = "") {
   return text === "0" ? "" : text
 }
 
+function currencyValue(value: unknown) {
+  const currency = optionalStringValue(value).toUpperCase()
+  return /^[A-Z]{3}$/.test(currency) ? currency : "MYR"
+}
+
+function paymentMethodValue(value: unknown) {
+  const text = optionalStringValue(value).toLowerCase().replace(/[_-]+/g, " ")
+  if (!text) return ""
+  if (text.includes("cash")) return "cash"
+  if (text.includes("online")) return "online_banking"
+  if (text.includes("bank") || text.includes("transfer") || text.includes("duitnow") || text.includes("fpx")) return "bank_transfer"
+  if (text.includes("credit")) return "credit_card"
+  if (text.includes("debit")) return "debit_card"
+  if (text.includes("wallet") || text.includes("touch") || text.includes("tng") || text.includes("grabpay") || text.includes("boost")) return "e_wallet"
+  if (text.includes("cheque") || text.includes("check")) return "cheque"
+  if (text.includes("card")) return "credit_card"
+  return "other"
+}
+
 function dateValue(value: unknown, fallback = "") {
   const text = optionalStringValue(value)
   return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : fallback
 }
 
+function statementDateValue(value: string) {
+  const trimmed = value.trim()
+  const numeric = trimmed.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$/)
+  if (numeric) {
+    const year = numeric[3].length === 2 ? `20${numeric[3]}` : numeric[3]
+    return `${year}-${numeric[2].padStart(2, "0")}-${numeric[1].padStart(2, "0")}`
+  }
+
+  const named = trimmed.match(/^(\d{1,2})\s+([A-Za-z]{3,9})\s+(\d{4})$/)
+  if (!named) return ""
+  const month = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"].indexOf(named[2].slice(0, 3).toLowerCase()) + 1
+  return month > 0 ? `${named[3]}-${String(month).padStart(2, "0")}-${named[1].padStart(2, "0")}` : ""
+}
+
+function moneyValue(value: string) {
+  const normalized = value.replace(/,/g, "").replace(/^RM\s*/i, "")
+  const number = Number.parseFloat(normalized)
+  return Number.isFinite(number) ? number : 0
+}
+
+function inferBankTransactionsFromText(rawText: string): BankStatementTransaction[] | undefined {
+  const lower = rawText.toLowerCase()
+  const looksLikeStatement = lower.includes("bank statement")
+    || lower.includes("account details and transaction history")
+    || (lower.includes("money in") && lower.includes("money out") && lower.includes("balance"))
+  if (!looksLikeStatement) return undefined
+
+  const transactions = rawText.split(/\r?\n/).flatMap((line) => {
+    const normalizedLine = line.replace(/\s+/g, " ").trim()
+    const dateMatch = normalizedLine.match(/\b(\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b/)
+    if (!dateMatch) return []
+    const date = statementDateValue(dateMatch[1])
+    if (!date) return []
+
+    const amountMatches = [...normalizedLine.matchAll(/\b(?:RM\s*)?\d{1,3}(?:,\d{3})*(?:\.\d{2})\b/g)]
+    if (amountMatches.length < 2) return []
+    const amounts = amountMatches.map((match) => moneyValue(match[0]))
+    const balance = amounts.at(-1)
+    const firstAmount = amounts.at(-3) ?? 0
+    const secondAmount = amounts.at(-2) ?? amounts.at(0) ?? 0
+    const beforeFirstAmount = amountMatches[0]?.index ?? normalizedLine.length
+    const description = normalizedLine.slice((dateMatch.index ?? 0) + dateMatch[0].length, beforeFirstAmount).replace(/\s{2,}/g, " ").trim()
+    if (!description || balance === undefined || !Number.isFinite(balance)) return []
+
+    const descriptionLower = description.toLowerCase()
+    const likelyMoneyIn = descriptionLower.includes("deposit") || descriptionLower.includes("credit") || descriptionLower.includes("interest") || descriptionLower.includes("cash deposit")
+    const moneyIn = amounts.length >= 3 ? firstAmount : likelyMoneyIn ? secondAmount : 0
+    const moneyOut = amounts.length >= 3 ? secondAmount : likelyMoneyIn ? 0 : secondAmount
+    if (moneyIn <= 0 && moneyOut <= 0) return []
+    return [{
+      date,
+      description,
+      moneyIn: Number(moneyIn.toFixed(2)),
+      moneyOut: Number(moneyOut.toFixed(2)),
+      balance: Number(balance.toFixed(2)),
+    }]
+  })
+
+  return transactions.length > 0 ? transactions : undefined
+}
+
 function normalizeAiFields(json: Record<string, unknown>): Partial<NormalizedDocumentFields> {
+  const rawText = stringValue(json.rawText)
   const rawItems = Array.isArray(json.lineItems) ? json.lineItems : []
   const lineItems = rawItems.map((item) => {
     const record = item && typeof item === "object" ? item as Record<string, unknown> : {}
@@ -302,6 +385,7 @@ function normalizeAiFields(json: Record<string, unknown>): Partial<NormalizedDoc
   const otherCharges = numberValue(json.otherCharges, optionalNumberValue(json.serviceCharge) + optionalNumberValue(json.deliveryCharge) + optionalNumberValue(json.roundingAdjustment))
   const taxAmount = numberValue(json.taxAmount, lineItems.reduce((sum, item) => sum + item.taxAmount, 0))
   const totalAmount = numberValue(json.totalAmount, subtotal + otherCharges + taxAmount)
+  const bankTransactions = normalizeBankTransactions(json.bankTransactions ?? json.transactions) ?? inferBankTransactionsFromText(rawText)
   const roundingDifference = Number((totalAmount - subtotal - otherCharges - taxAmount).toFixed(2))
   if (totalAmount > 0 && Math.abs(roundingDifference) > 0 && Math.abs(roundingDifference) <= 0.05) {
     subtotal = Number((totalAmount - otherCharges - taxAmount).toFixed(2))
@@ -318,7 +402,7 @@ function normalizeAiFields(json: Record<string, unknown>): Partial<NormalizedDoc
     documentDate: dateValue(json.documentDate, today()),
     dueDate: dateValue(json.dueDate),
     documentNumber: stringValue(json.documentNumber),
-    currency: stringValue(json.currency, "MYR"),
+    currency: currencyValue(json.currency),
     vendorName: optionalStringValue(json.vendorName),
     clientName: optionalStringValue(json.clientName),
     taxId: optionalStringValue(json.taxId),
@@ -326,10 +410,34 @@ function normalizeAiFields(json: Record<string, unknown>): Partial<NormalizedDoc
     otherCharges: Number(otherCharges.toFixed(2)),
     taxAmount: Number(taxAmount.toFixed(2)),
     totalAmount: Number(totalAmount.toFixed(2)),
-    paymentMethod: stringValue(json.paymentMethod),
+    paymentMethod: paymentMethodValue(json.paymentMethod),
     lineItems: lineItems.length > 0 ? lineItems : undefined,
+    bankTransactions,
     warnings: Array.isArray(json.warnings) ? json.warnings.map(String) : [],
   }
+}
+
+function normalizeBankTransactions(value: unknown): BankStatementTransaction[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const transactions = value.flatMap((item) => {
+    const record = item && typeof item === "object" ? item as Record<string, unknown> : null
+    if (!record) return []
+    const date = dateValue(record.date)
+    const description = optionalStringValue(record.description || record.transactionDetails || record.details)
+    const moneyIn = numberValue(record.moneyIn ?? record.inflow ?? record.credit, 0)
+    const moneyOut = numberValue(record.moneyOut ?? record.outflow ?? record.debit, 0)
+    const balance = numberValue(record.balance, NaN)
+    if (!date || !description || (moneyIn <= 0 && moneyOut <= 0)) return []
+    return [{
+      date,
+      description,
+      reference: optionalStringValue(record.reference),
+      moneyIn: Number(moneyIn.toFixed(2)),
+      moneyOut: Number(moneyOut.toFixed(2)),
+      balance: Number.isFinite(balance) ? Number(balance.toFixed(2)) : undefined,
+    }]
+  })
+  return transactions.length > 0 ? transactions : undefined
 }
 
 async function extractWithGemmaEndpoint(input: { filePath: string; mimeType: string; originalFilename: string; pdfAnalysis?: Awaited<ReturnType<typeof analyzeLocalPdf>> }): Promise<OcrResult | null> {
@@ -342,54 +450,85 @@ async function extractWithGemmaEndpoint(input: { filePath: string; mimeType: str
   const imageInputs = input.mimeType.startsWith("image/")
     ? [{ mimeType: input.mimeType, bytes: await fs.readFile(input.filePath) }]
     : input.mimeType === "application/pdf" && input.pdfAnalysis?.looksScanned
-      ? await renderPdfPages({ filePath: input.filePath, maxPages: Math.min(input.pdfAnalysis.pageCount, 3) })
+      ? await renderPdfPages({ filePath: input.filePath, maxPages: Math.min(input.pdfAnalysis.pageCount, 10) })
       : []
   if (imageInputs.length === 0) return null
 
   const endpoint = chatCompletionsUrl(env.aiBaseUrl)
   const headers: Record<string, string> = { "Content-Type": "application/json" }
   if (env.aiApiKey) headers.Authorization = `Bearer ${env.aiApiKey}`
+  const likelyBankStatement = /bank|statement|cimb|maybank|public bank|rhb|hong leong|ambank|ocbc|uob/i.test(input.originalFilename)
 
   const prompt = [
     "You are an OCR and receipt/document extraction engine for an accounting system.",
     "Extract visible text and structured accounting fields from the supplied page image or images.",
+    likelyBankStatement ? "This file is likely a bank statement. Prioritize extracting the transaction table rows." : "",
     "Return only one JSON object with these keys:",
-    "rawText, documentDate, dueDate, documentNumber, currency, vendorName, clientName, taxId, subtotal, otherCharges, taxAmount, totalAmount, paymentMethod, lineItems, warnings.",
-    "For bank statements, include transaction rows in rawText even when totalAmount is 0.",
+    "rawText, documentDate, dueDate, documentNumber, currency, vendorName, clientName, taxId, subtotal, otherCharges, taxAmount, totalAmount, paymentMethod, lineItems, bankTransactions, warnings.",
+    "For bank statements, keep rawText short and do not combine rows into one total.",
+    "For bank statements, also return bankTransactions as an array of every table row with: date, description, reference, moneyIn, moneyOut, balance.",
+    "For bank statements, use totalAmount 0 and lineItems [] unless the statement has one single transaction only.",
+    likelyBankStatement ? "For this likely bank statement, return no prose and omit full-page raw text; focus on bankTransactions." : "",
+    "For currency, return a 3-letter ISO code such as MYR, USD, SGD, CNY, EUR, GBP, JPY, AUD, THB, or IDR.",
+    "For paymentMethod, choose one of: cash, bank_transfer, online_banking, credit_card, debit_card, e_wallet, cheque, other, or empty string when unpaid/unknown.",
     "Put service charge, delivery fee, rounding adjustment, and other non-tax charges in otherCharges.",
     "lineItems must contain description, quantity, unitPrice, taxRate, taxAmount, lineTotal.",
     "Use MYR when currency is unclear. Use YYYY-MM-DD dates. Use 0 for unknown numeric values.",
-  ].join("\n")
+  ].filter(Boolean).join("\n")
 
-  const payload = await fetchAiJson(endpoint, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({
-      model: env.aiModel,
-      temperature: 0,
-      messages: [
-        { role: "system", content: prompt },
-        {
-          role: "user",
-          content: [
-            { type: "text", text: `Extract accounting OCR data from ${input.originalFilename}.` },
-            ...imageInputs.map((image) => ({
-              type: "image_url",
-              image_url: { url: `data:${image.mimeType};base64,${image.bytes.toString("base64")}`, detail: "high" },
-            })),
-          ],
-        },
-      ],
-    }),
-  }, 120_000) as { choices?: Array<{ message?: { content?: string } }> }
-  const content = payload.choices?.[0]?.message?.content ?? ""
-  const json = extractJsonObject(content)
-  if (!json) throw new Error("Gemma OCR endpoint did not return JSON.")
+  async function extractImages(images: typeof imageInputs, label: string) {
+    const payload = await fetchAiJson(endpoint, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: env.aiModel,
+        temperature: 0,
+        messages: [
+          { role: "system", content: prompt },
+          {
+            role: "user",
+            content: [
+              { type: "text", text: `Extract accounting OCR data from ${label}.` },
+              ...images.map((image) => ({
+                type: "image_url",
+                image_url: { url: `data:${image.mimeType};base64,${image.bytes.toString("base64")}`, detail: "high" },
+              })),
+            ],
+          },
+        ],
+      }),
+    }, likelyBankStatement ? BANK_OCR_PAGE_TIMEOUT_MS : DOCUMENT_OCR_TIMEOUT_MS) as { choices?: Array<{ message?: { content?: string } }> }
+    const content = payload.choices?.[0]?.message?.content ?? ""
+    const json = extractJsonObject(content)
+    if (!json) throw new Error("Gemma OCR endpoint did not return JSON.")
+    return { rawText: stringValue(json.rawText, content), fields: normalizeAiFields(json) }
+  }
 
-  const fields = normalizeAiFields(json)
+  if (input.mimeType === "application/pdf" && imageInputs.length > 1) {
+    const pageResults = []
+    for (let index = 0; index < imageInputs.length; index += 1) {
+      pageResults.push(await extractImages([imageInputs[index]], `${input.originalFilename} page ${index + 1}`))
+    }
+    const firstFields = pageResults[0]?.fields ?? {}
+    const bankTransactions = pageResults.flatMap((result) => result.fields.bankTransactions ?? [])
+    return {
+      rawText: pageResults.map((result) => result.rawText).filter(Boolean).join("\n\n"),
+      fields: {
+        ...firstFields,
+        bankTransactions: bankTransactions.length > 0 ? bankTransactions : firstFields.bankTransactions,
+        lineItems: bankTransactions.length > 0 ? [] : firstFields.lineItems,
+        totalAmount: bankTransactions.length > 0 ? 0 : firstFields.totalAmount,
+      },
+      confidence: 0.9,
+      pageCount: imageInputs.length,
+      engine: `gemma-endpoint:${env.aiModel}`,
+    }
+  }
+
+  const result = await extractImages(imageInputs, input.originalFilename)
   return {
-    rawText: stringValue(json.rawText, content),
-    fields,
+    rawText: result.rawText,
+    fields: result.fields,
     confidence: 0.9,
     pageCount: input.mimeType === "application/pdf" ? imageInputs.length : undefined,
     engine: `gemma-endpoint:${env.aiModel}`,
