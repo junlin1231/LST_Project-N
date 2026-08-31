@@ -1,0 +1,39 @@
+services:
+  admin_db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-admin_panel}
+      POSTGRES_USER: ${POSTGRES_USER:-admin_panel}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-admin_panel}
+    volumes:
+      - admin_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin_panel -d admin_panel"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  admin_web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-dev-only-change-me}
+      AUTH_SHARED_SECRET: ${AUTH_SHARED_SECRET:-dev-only-change-me}
+      ACCOUNTING_APP_URL: ${ACCOUNTING_APP_URL:-http://localhost:3000}
+      ACCESS_COOKIE_NAME: ${ACCESS_COOKIE_NAME:-lst_access_token}
+      ACCESS_COOKIE_MAX_AGE: ${ACCESS_COOKIE_MAX_AGE:-43200}
+      DJANGO_DEBUG: ${DJANGO_DEBUG:-1}
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-127.0.0.1,localhost,0.0.0.0}
+      DATABASE_URL: postgres://${POSTGRES_USER:-admin_panel}:${POSTGRES_PASSWORD:-admin_panel}@admin_db:5432/${POSTGRES_DB:-admin_panel}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@example.com}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin12345}
+      ADMIN_NAME: ${ADMIN_NAME:-Demo Admin}
+    ports:
+      - "8000:8000"
+    depends_on:
+      admin_db:
+        condition: service_healthy
+
+volumes:
+  admin_postgres_data:

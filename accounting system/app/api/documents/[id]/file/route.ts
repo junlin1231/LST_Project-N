@@ -1,5 +1,6 @@
-import { NextResponse } from "next/server"
+import { NextRequest, NextResponse } from "next/server"
 import { getDocumentFile } from "@/lib/server/document-repository"
+import { withTenantContext } from "@/lib/server/auth-context"
 
 export const runtime = "nodejs"
 
@@ -18,15 +19,17 @@ function contentDisposition(filename: string) {
   return `inline; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(filename)}`
 }
 
-export async function GET(_request: Request, context: { params: Promise<{ id: string }> }) {
+export async function GET(request: NextRequest, context: { params: Promise<{ id: string }> }) {
   try {
-    const { id } = await context.params
-    const file = await getDocumentFile(id)
-    return new NextResponse(file.bytes, {
-      headers: {
-        "Content-Type": file.mimeType,
-        "Content-Disposition": contentDisposition(file.filename),
-      },
+    return await withTenantContext(request, async () => {
+      const { id } = await context.params
+      const file = await getDocumentFile(id)
+      return new NextResponse(file.bytes, {
+        headers: {
+          "Content-Type": file.mimeType,
+          "Content-Disposition": contentDisposition(file.filename),
+        },
+      })
     })
   } catch (error) {
     return errorResponse(error)

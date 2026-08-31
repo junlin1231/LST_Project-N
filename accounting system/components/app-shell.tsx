@@ -16,8 +16,11 @@ import {
   Settings,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { useAccounting } from "@/lib/accounting/store"
+import { useCompany } from "@/lib/accounting/company-store"
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet"
 import { Button } from "@/components/ui/button"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 
 const NAV = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
@@ -73,6 +76,42 @@ function Brand() {
   )
 }
 
+function CompanySwitcher() {
+  const { companies, activeCompany, loading, switchCompany } = useCompany()
+  const { refreshAccountingData } = useAccounting()
+
+  const handleSwitch = async (companyId: string) => {
+    await switchCompany(companyId)
+    await refreshAccountingData()
+  }
+
+  if (loading || !activeCompany) {
+    return (
+      <div className="rounded-md border border-sidebar-border/70 px-3 py-2 text-xs text-sidebar-foreground/60">
+        Loading company
+      </div>
+    )
+  }
+
+  return (
+    <Select value={activeCompany.id} onValueChange={(value) => value && void handleSwitch(value)}>
+      <SelectTrigger className="w-full border-sidebar-border/70 bg-sidebar-accent/30 text-sidebar-foreground">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent alignItemWithTrigger>
+        {companies.map((company) => (
+          <SelectItem key={company.id} value={company.id}>
+            <span className="flex min-w-0 flex-col">
+              <span className="truncate">{company.name}</span>
+              <span className="text-xs text-muted-foreground">{company.role}</span>
+            </span>
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  )
+}
+
 export function AppShell({ children }: { children: ReactNode }) {
   const [open, setOpen] = useState(false)
 
@@ -83,6 +122,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         <div className="pt-2">
           <Brand />
         </div>
+        <CompanySwitcher />
         <NavList />
         <div className="mt-auto rounded-md bg-sidebar-accent/40 p-3 text-[11px] leading-relaxed text-sidebar-foreground/60">
           Database mode &middot; accounting records persist in PostgreSQL.
@@ -103,6 +143,9 @@ export function AppShell({ children }: { children: ReactNode }) {
             <SheetContent side="left" className="w-64 bg-sidebar p-3">
               <div className="pb-4 pt-1">
                 <Brand />
+              </div>
+              <div className="mb-4">
+                <CompanySwitcher />
               </div>
               <NavList onNavigate={() => setOpen(false)} />
             </SheetContent>

@@ -21,7 +21,7 @@ import type {
 import { DOCUMENT_CATEGORIES } from "@/lib/accounting/document-types"
 import type { JournalEntry, JournalLine } from "@/lib/accounting/types"
 import { isJournalEntryBalanced } from "@/lib/accounting/calculations"
-import { DEFAULT_COMPANY_ID, DEFAULT_USER_ID, insertJournalEntry } from "./accounting-repository"
+import { currentCompanyId, currentUserId, insertJournalEntry } from "./accounting-repository"
 import { ensureDatabaseReady, query, transaction, type DbExecutor } from "./db"
 import { categorizationAdapter } from "./categorization-adapter"
 import { ocrAdapter, type OcrResult } from "./ocr-adapter"
@@ -195,14 +195,20 @@ async function exec(db: DbExecutor, sql: string, values?: unknown[]) {
 async function ensureDemoCompany() {
   await ensureDatabaseReady()
   await transaction(async (client) => {
-    await exec(client, "INSERT INTO companies (id, name, base_currency) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING", [
-      DEFAULT_COMPANY_ID,
-      "Demo Company",
-      "MYR",
-    ])
+    await exec(
+      client,
+      `INSERT INTO companies (id, name, base_currency, ocr_own_names)
+       VALUES ($1, $2, $3, ARRAY[$2]::TEXT[])
+       ON CONFLICT (id) DO UPDATE
+       SET ocr_own_names = CASE
+         WHEN cardinality(companies.ocr_own_names) = 0 THEN ARRAY[EXCLUDED.name]::TEXT[]
+         ELSE companies.ocr_own_names
+       END`,
+      [currentCompanyId(), "Demo Company", "MYR"],
+    )
     await exec(client, "INSERT INTO users (id, company_id, name, email, role) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (id) DO NOTHING", [
-      DEFAULT_USER_ID,
-      DEFAULT_COMPANY_ID,
+      currentUserId(),
+      currentCompanyId(),
       "Demo Admin",
       "admin@example.com",
       "admin",
@@ -216,7 +222,7 @@ async function updateDocumentStatus(db: DbExecutor, id: string, processingStatus
     `UPDATE documents
      SET processing_status = $1, review_status = COALESCE($2, review_status), updated_at = NOW()
      WHERE id = $3 AND company_id = $4`,
-    [processingStatus, reviewStatus ?? null, id, DEFAULT_COMPANY_ID],
+    [processingStatus, reviewStatus ?? null, id, currentCompanyId()],
   )
 }
 
@@ -237,12 +243,12 @@ export async function createDocumentUpload(input: {
     `SELECT id, original_filename, storage_path, mime_type, file_size_bytes::text, sha256_hash, parent_document_id, receipt_index, '0'::text AS child_document_count, processing_status, review_status, source_channel, uploaded_at, updated_at
      FROM documents
      WHERE company_id = $1 AND sha256_hash = $2`,
-    [DEFAULT_COMPANY_ID, hash],
+    [currentCompanyId(), hash],
   )
   if (duplicate.rows[0]) return getDocumentDetail(duplicate.rows[0].id)
 
   const id = `doc-${randomUUID()}`
-  const companyDir = path.join(documentStorageRoot(), DEFAULT_COMPANY_ID)
+  const companyDir = path.join(documentStorageRoot(), currentCompanyId())
   await fs.mkdir(companyDir, { recursive: true })
   const filename = `${id}-${safeFilename(input.filename)}`
   const storagePath = path.join(companyDir, filename)
@@ -253,7 +259,7 @@ export async function createDocumentUpload(input: {
       id, company_id, uploaded_by, original_filename, storage_path, mime_type, file_size_bytes, sha256_hash,
       processing_status, review_status, source_channel, parent_document_id, receipt_index
     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'stored', 'pending', $9, $10, $11)`,
-    [id, DEFAULT_COMPANY_ID, DEFAULT_USER_ID, input.filename, storagePath, input.mimeType, input.bytes.byteLength, hash, input.sourceChannel, input.parentDocumentId ?? null, input.receiptIndex ?? null],
+    [id, currentCompanyId(), currentUserId(), input.filename, storagePath, input.mimeType, input.bytes.byteLength, hash, input.sourceChannel, input.parentDocumentId ?? null, input.receiptIndex ?? null],
   )
 
   return getDocumentDetail(id)
@@ -273,7 +279,7 @@ export async function listDocuments(): Promise<OcrDocument[]> {
          WHERE child.company_id = d.company_id AND child.parent_document_id = d.id
        ))
      ORDER BY d.uploaded_at DESC`,
-    [DEFAULT_COMPANY_ID],
+    [currentCompanyId()],
   )
   return result.rows.map(mapDocument)
 }
@@ -285,7 +291,7 @@ async function getDocumentRow(id: string) {
        d.processing_status, d.review_status, d.source_channel, d.uploaded_at, d.updated_at
      FROM documents d
      WHERE d.company_id = $1 AND d.id = $2`,
-    [DEFAULT_COMPANY_ID, id],
+    [currentCompanyId(), id],
   )
   return result.rows[0]
 }
@@ -298,22 +304,22 @@ export async function getDocumentDetail(id: string): Promise<OcrDocumentDetail> 
     query<ExtractionRow>(
       `SELECT raw_text, extracted_fields, ocr_engine, ocr_confidence::text, status, error_message, created_at
        FROM document_extractions WHERE company_id = $1 AND document_id = $2 ORDER BY created_at DESC LIMIT 1`,
-      [DEFAULT_COMPANY_ID, id],
+      [currentCompanyId(), id],
     ),
     query<CategoryRow>(
       `SELECT category, confidence::text, reason, model_name, model_version, raw_output, requires_review, created_at
        FROM document_categories WHERE company_id = $1 AND document_id = $2 ORDER BY created_at DESC LIMIT 1`,
-      [DEFAULT_COMPANY_ID, id],
+      [currentCompanyId(), id],
     ),
     query<DraftRow>(
       `SELECT id, draft_type, normalized_fields, suggested_journal_lines, status, journal_entry_id, created_at, updated_at
        FROM document_accounting_drafts WHERE company_id = $1 AND document_id = $2 ORDER BY created_at DESC LIMIT 1`,
-      [DEFAULT_COMPANY_ID, id],
+      [currentCompanyId(), id],
     ),
     query<ConfirmationRow>(
       `SELECT id, status, decision_reason, preview_snapshot, decided_at, created_at
        FROM posting_confirmations WHERE company_id = $1 AND document_id = $2 ORDER BY created_at DESC LIMIT 1`,
-      [DEFAULT_COMPANY_ID, id],
+      [currentCompanyId(), id],
     ),
   ])
 
@@ -334,7 +340,7 @@ export async function getDocumentDetailByJournalEntryId(journalEntryId: string):
      WHERE company_id = $1 AND journal_entry_id = $2
      ORDER BY updated_at DESC
      LIMIT 1`,
-    [DEFAULT_COMPANY_ID, journalEntryId],
+    [currentCompanyId(), journalEntryId],
   )
   const documentId = result.rows[0]?.document_id
   return documentId ? getDocumentDetail(documentId) : null
@@ -368,14 +374,14 @@ export async function deleteUnpostedDocument(id: string) {
      FROM document_accounting_drafts
      WHERE company_id = $1 AND document_id = $2 AND (status = 'posted' OR journal_entry_id IS NOT NULL)
      LIMIT 1`,
-    [DEFAULT_COMPANY_ID, id],
+    [currentCompanyId(), id],
   )
   if (postedDraft.rows[0]) throw new Error("Documents with posted journal entries cannot be deleted.")
 
   const resolved = resolveStoredDocumentPath(row.storage_path)
 
   await transaction(async (client) => {
-    await exec(client, "DELETE FROM documents WHERE id = $1 AND company_id = $2", [id, DEFAULT_COMPANY_ID])
+    await exec(client, "DELETE FROM documents WHERE id = $1 AND company_id = $2", [id, currentCompanyId()])
   })
   await fs.unlink(resolved).catch((error: NodeJS.ErrnoException) => {
     if (error.code !== "ENOENT") throw error
@@ -428,25 +434,25 @@ async function storeOcrDraftForDocument(row: DocumentRow, ocr: OcrResult) {
       client,
       `INSERT INTO document_extractions (id, company_id, document_id, raw_text, extracted_fields, ocr_engine, ocr_confidence, status)
        VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, 'completed')`,
-      [`ocr-${randomUUID()}`, DEFAULT_COMPANY_ID, row.id, ocr.rawText, JSON.stringify(ocr.fields), ocr.engine, ocr.confidence ?? null],
+      [`ocr-${randomUUID()}`, currentCompanyId(), row.id, ocr.rawText, JSON.stringify(ocr.fields), ocr.engine, ocr.confidence ?? null],
     )
     await exec(
       client,
       `INSERT INTO document_categories (id, company_id, document_id, category, confidence, reason, model_name, model_version, raw_output, requires_review)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, TRUE)`,
-      [`cat-${randomUUID()}`, DEFAULT_COMPANY_ID, row.id, category.category, category.confidence, category.reason, category.modelName, category.modelVersion ?? null, JSON.stringify(category.rawOutput)],
+      [`cat-${randomUUID()}`, currentCompanyId(), row.id, category.category, category.confidence, category.reason, category.modelName, category.modelVersion ?? null, JSON.stringify(category.rawOutput)],
     )
     await exec(
       client,
       `INSERT INTO document_accounting_drafts (id, company_id, document_id, draft_type, normalized_fields, suggested_journal_lines, status)
        VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, 'draft')`,
-      [draftId, DEFAULT_COMPANY_ID, row.id, category.category, JSON.stringify(normalizedFields), JSON.stringify(category.suggestedJournalLines)],
+      [draftId, currentCompanyId(), row.id, category.category, JSON.stringify(normalizedFields), JSON.stringify(category.suggestedJournalLines)],
     )
     await exec(
       client,
       `INSERT INTO posting_confirmations (id, company_id, document_id, draft_id, status, preview_snapshot)
        VALUES ($1, $2, $3, $4, 'pending', $5::jsonb)`,
-      [confirmationId, DEFAULT_COMPANY_ID, row.id, draftId, JSON.stringify({ normalizedFields, suggestedJournalLines: category.suggestedJournalLines })],
+      [confirmationId, currentCompanyId(), row.id, draftId, JSON.stringify({ normalizedFields, suggestedJournalLines: category.suggestedJournalLines })],
     )
   })
 }
@@ -455,7 +461,7 @@ async function processOneDocument(id: string) {
   const row = await getDocumentRow(id)
   if (!row) throw new Error("Document was not found.")
   try {
-    await query("UPDATE documents SET processing_status = 'ocr_processing', updated_at = NOW() WHERE id = $1 AND company_id = $2", [id, DEFAULT_COMPANY_ID])
+    await query("UPDATE documents SET processing_status = 'ocr_processing', updated_at = NOW() WHERE id = $1 AND company_id = $2", [id, currentCompanyId()])
     const ocr = await ocrAdapter.extract({ filePath: resolveStoredDocumentPath(row.storage_path), mimeType: row.mime_type, originalFilename: row.original_filename })
     await storeOcrDraftForDocument(row, ocr)
   } catch (error) {
@@ -465,7 +471,7 @@ async function processOneDocument(id: string) {
         client,
         `INSERT INTO document_extractions (id, company_id, document_id, raw_text, extracted_fields, ocr_engine, status, error_message)
          VALUES ($1, $2, $3, '', '{}'::jsonb, 'mock-local-ocr', 'failed', $4)`,
-        [`ocr-${randomUUID()}`, DEFAULT_COMPANY_ID, id, error instanceof Error ? error.message : "OCR failed."],
+        [`ocr-${randomUUID()}`, currentCompanyId(), id, error instanceof Error ? error.message : "OCR failed."],
       )
     })
     throw error
@@ -487,7 +493,7 @@ async function childDocumentRows(parentDocumentId: string) {
      FROM documents
      WHERE company_id = $1 AND parent_document_id = $2
      ORDER BY receipt_index ASC, uploaded_at ASC`,
-    [DEFAULT_COMPANY_ID, parentDocumentId],
+    [currentCompanyId(), parentDocumentId],
   )
   return result.rows
 }
@@ -503,7 +509,7 @@ async function deleteUnpostedChildDocuments(parentDocumentId: string, children: 
       client,
       `DELETE FROM documents
        WHERE company_id = $1 AND parent_document_id = $2`,
-      [DEFAULT_COMPANY_ID, parentDocumentId],
+      [currentCompanyId(), parentDocumentId],
     )
   })
 
@@ -521,7 +527,7 @@ async function recordSplitParent(id: string, transactionCount: number, source: "
        VALUES ($1, $2, $3, $4, $5::jsonb, 'transaction-splitter', 'completed')`,
       [
         `ocr-${randomUUID()}`,
-        DEFAULT_COMPANY_ID,
+        currentCompanyId(),
         id,
         `Multiple transactions detected. ${transactionCount} separate documents were created and scanned.`,
         JSON.stringify({ transactionCount, splitSource: source, splitIntoSeparateDocuments: true }),
@@ -578,7 +584,7 @@ export async function processDocument(id: string): Promise<DocumentProcessResult
       const pageCount = await countPdfPages(filePath)
       if (pageCount < 1) return { detail: await processOneDocument(id) }
 
-      await query("UPDATE documents SET processing_status = 'ocr_processing', updated_at = NOW() WHERE id = $1 AND company_id = $2", [id, DEFAULT_COMPANY_ID])
+      await query("UPDATE documents SET processing_status = 'ocr_processing', updated_at = NOW() WHERE id = $1 AND company_id = $2", [id, currentCompanyId()])
       const pages = await splitPdfIntoPageImages({ filePath })
       const pageTransactions: Array<{ pageNumber: number; transactionNumber: number; bytes: Buffer }> = []
       const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ocr-pdf-page-"))
@@ -629,7 +635,7 @@ export async function processDocument(id: string): Promise<DocumentProcessResult
       })
       if (regions.length < 2) return { detail: await processOneDocument(id) }
 
-      await query("UPDATE documents SET processing_status = 'ocr_processing', updated_at = NOW() WHERE id = $1 AND company_id = $2", [id, DEFAULT_COMPANY_ID])
+      await query("UPDATE documents SET processing_status = 'ocr_processing', updated_at = NOW() WHERE id = $1 AND company_id = $2", [id, currentCompanyId()])
       const crops = await splitImageIntoReceipts({ filePath, regions })
       await Promise.all(crops.map((bytes: Buffer, index: number) => createDocumentUpload({
         filename: `${baseName}-transaction-${String(index + 1).padStart(2, "0")}.jpg`,
@@ -795,14 +801,14 @@ export async function updateDocumentDraft(id: string, input: { category: unknown
       `UPDATE document_accounting_drafts
        SET draft_type = $1, normalized_fields = $2::jsonb, suggested_journal_lines = $3::jsonb, status = 'draft', updated_at = NOW()
        WHERE id = $4 AND company_id = $5`,
-      [category, JSON.stringify(fields), JSON.stringify(lines), detail.draft?.id, DEFAULT_COMPANY_ID],
+      [category, JSON.stringify(fields), JSON.stringify(lines), detail.draft?.id, currentCompanyId()],
     )
     await exec(
       client,
       `UPDATE posting_confirmations
        SET status = 'edited', preview_snapshot = $1::jsonb
        WHERE document_id = $2 AND company_id = $3 AND status IN ('pending', 'edited')`,
-      [JSON.stringify({ normalizedFields: fields, suggestedJournalLines: lines }), id, DEFAULT_COMPANY_ID],
+      [JSON.stringify({ normalizedFields: fields, suggestedJournalLines: lines }), id, currentCompanyId()],
     )
     await updateDocumentStatus(client, id, "needs_review", "edited")
   })
@@ -818,13 +824,13 @@ export async function confirmDocumentDraft(id: string, reason?: string) {
   if (fields.warnings.length > 0) throw new Error(`Resolve warnings before confirming: ${fields.warnings.join(" ")}`)
 
   await transaction(async (client) => {
-    await exec(client, "UPDATE document_accounting_drafts SET status = 'confirmed', updated_at = NOW() WHERE id = $1 AND company_id = $2", [detail.draft?.id, DEFAULT_COMPANY_ID])
+    await exec(client, "UPDATE document_accounting_drafts SET status = 'confirmed', updated_at = NOW() WHERE id = $1 AND company_id = $2", [detail.draft?.id, currentCompanyId()])
     await exec(
       client,
       `UPDATE posting_confirmations
        SET status = 'confirmed', confirmed_by = $1, decision_reason = $2, preview_snapshot = $3::jsonb, decided_at = NOW()
        WHERE document_id = $4 AND company_id = $5 AND status IN ('pending', 'edited', 'confirmed')`,
-      [DEFAULT_USER_ID, reason?.trim() || null, JSON.stringify({ normalizedFields: fields, suggestedJournalLines: detail.draft?.suggestedJournalLines ?? [] }), id, DEFAULT_COMPANY_ID],
+      [currentUserId(), reason?.trim() || null, JSON.stringify({ normalizedFields: fields, suggestedJournalLines: detail.draft?.suggestedJournalLines ?? [] }), id, currentCompanyId()],
     )
     await updateDocumentStatus(client, id, "confirmed", "confirmed")
   })
@@ -836,12 +842,12 @@ export async function rejectDocument(id: string, reason: string) {
   const detail = await getDocumentDetail(id)
   if (!detail.draft) throw new Error("Document draft was not found.")
   await transaction(async (client) => {
-    await exec(client, "UPDATE document_accounting_drafts SET status = 'rejected', updated_at = NOW() WHERE id = $1 AND company_id = $2", [detail.draft?.id, DEFAULT_COMPANY_ID])
+    await exec(client, "UPDATE document_accounting_drafts SET status = 'rejected', updated_at = NOW() WHERE id = $1 AND company_id = $2", [detail.draft?.id, currentCompanyId()])
     await exec(
       client,
       `UPDATE posting_confirmations SET status = 'rejected', confirmed_by = $1, decision_reason = $2, decided_at = NOW()
        WHERE document_id = $3 AND company_id = $4`,
-      [DEFAULT_USER_ID, reason.trim() || "Rejected before posting", id, DEFAULT_COMPANY_ID],
+      [currentUserId(), reason.trim() || "Rejected before posting", id, currentCompanyId()],
     )
     await updateDocumentStatus(client, id, "rejected", "rejected")
   })
@@ -857,7 +863,7 @@ export async function postConfirmedDocument(id: string) {
   const lines = validateJournalLines(detail.draft.suggestedJournalLines, fields.documentDate)
   if (lines.length === 0 && bankTransactions.length === 0) throw new Error("Add balanced journal lines before posting.")
 
-  await query("UPDATE documents SET processing_status = 'posting', updated_at = NOW() WHERE id = $1 AND company_id = $2", [id, DEFAULT_COMPANY_ID])
+  await query("UPDATE documents SET processing_status = 'posting', updated_at = NOW() WHERE id = $1 AND company_id = $2", [id, currentCompanyId()])
   try {
     if (detail.draft.draftType === "bank_document" && bankTransactions.length > 0) {
       const config = await getActiveRuleConfig()
@@ -875,9 +881,9 @@ export async function postConfirmedDocument(id: string) {
         await exec(client, "UPDATE document_accounting_drafts SET status = 'posted', journal_entry_id = $1, updated_at = NOW() WHERE id = $2 AND company_id = $3", [
           journalEntries[0]?.id ?? null,
           detail.draft?.id,
-          DEFAULT_COMPANY_ID,
+          currentCompanyId(),
         ])
-        await exec(client, "UPDATE posting_confirmations SET status = 'posted' WHERE document_id = $1 AND company_id = $2", [id, DEFAULT_COMPANY_ID])
+        await exec(client, "UPDATE posting_confirmations SET status = 'posted' WHERE document_id = $1 AND company_id = $2", [id, currentCompanyId()])
         await updateDocumentStatus(client, id, "posted", "posted")
       })
       return { detail: await getDocumentDetail(id), journalEntries }
@@ -895,14 +901,14 @@ export async function postConfirmedDocument(id: string) {
       await exec(client, "UPDATE document_accounting_drafts SET status = 'posted', journal_entry_id = $1, updated_at = NOW() WHERE id = $2 AND company_id = $3", [
         journalEntry.id,
         detail.draft?.id,
-        DEFAULT_COMPANY_ID,
+        currentCompanyId(),
       ])
-      await exec(client, "UPDATE posting_confirmations SET status = 'posted' WHERE document_id = $1 AND company_id = $2", [id, DEFAULT_COMPANY_ID])
+      await exec(client, "UPDATE posting_confirmations SET status = 'posted' WHERE document_id = $1 AND company_id = $2", [id, currentCompanyId()])
       await updateDocumentStatus(client, id, "posted", "posted")
     })
     return { detail: await getDocumentDetail(id), journalEntry }
   } catch (error) {
-    await query("UPDATE documents SET processing_status = 'posting_failed', updated_at = NOW() WHERE id = $1 AND company_id = $2", [id, DEFAULT_COMPANY_ID])
+    await query("UPDATE documents SET processing_status = 'posting_failed', updated_at = NOW() WHERE id = $1 AND company_id = $2", [id, currentCompanyId()])
     throw error
   }
 }

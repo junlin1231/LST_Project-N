@@ -6,7 +6,7 @@ import {
   type DocumentMasterDataOption,
   type DocumentMasterDataType,
 } from "@/lib/accounting/document-master-data"
-import { DEFAULT_COMPANY_ID } from "./accounting-repository"
+import { currentCompanyId } from "./accounting-repository"
 import { ensureDatabaseReady, query, transaction, type DbExecutor } from "./db"
 
 interface DocumentMasterDataRow {
@@ -83,7 +83,7 @@ export async function ensureDocumentMasterData() {
         `INSERT INTO document_master_data_options (id, company_id, option_type, value, label, is_active, sort_order)
          VALUES ($1, $2, $3, $4, $5, $6, $7)
          ON CONFLICT (company_id, option_type, value) DO NOTHING`,
-        [option.id, DEFAULT_COMPANY_ID, option.type, option.value, option.label, option.isActive, option.sortOrder],
+        [option.id, currentCompanyId(), option.type, option.value, option.label, option.isActive, option.sortOrder],
       )
     }
   })
@@ -96,7 +96,7 @@ export async function listDocumentMasterData() {
      FROM document_master_data_options
      WHERE company_id = $1
      ORDER BY option_type ASC, sort_order ASC, label ASC`,
-    [DEFAULT_COMPANY_ID],
+    [currentCompanyId()],
   )
   return result.rows.map(mapOption)
 }
@@ -120,7 +120,7 @@ export async function createDocumentMasterDataOption(input: { type: unknown; val
      ON CONFLICT (company_id, option_type, value)
      DO UPDATE SET label = EXCLUDED.label, is_active = TRUE, sort_order = EXCLUDED.sort_order, updated_at = NOW()
      RETURNING id, option_type, value, label, is_active, sort_order`,
-    [id, DEFAULT_COMPANY_ID, type, value, label, sortOrder],
+    [id, currentCompanyId(), type, value, label, sortOrder],
   )
   return mapOption(result.rows[0])
 }
@@ -138,7 +138,7 @@ export async function updateDocumentMasterDataOption(id: string, input: { label?
          updated_at = NOW()
      WHERE id = $4 AND company_id = $5
      RETURNING id, option_type, value, label, is_active, sort_order`,
-    [label, isActive, Number.isFinite(sortOrder) ? sortOrder : null, id, DEFAULT_COMPANY_ID],
+    [label, isActive, Number.isFinite(sortOrder) ? sortOrder : null, id, currentCompanyId()],
   )
   if (!result.rows[0]) throw new Error("Master data option was not found.")
   return mapOption(result.rows[0])

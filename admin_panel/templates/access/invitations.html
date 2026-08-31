@@ -1,0 +1,45 @@
+{% extends "access/base.html" %}
+{% load access_extras %}
+{% block title %}Invitations{% endblock %}
+{% block content %}
+<header class="page-header"><h1>Invitations</h1></header>
+<section class="panel">
+  <h2>Create invitation</h2>
+  <form method="post" class="form inline">
+    {% csrf_token %}
+    {{ form.as_p }}
+    <button type="submit">Invite</button>
+  </form>
+</section>
+<table>
+  <thead><tr><th>Email</th><th>Role</th><th>Status</th><th>Invited by</th><th>Expires</th><th>Accept link</th><th></th></tr></thead>
+  <tbody>
+    {% for invitation in invitations %}
+      <tr>
+        <td>{{ invitation.email }}</td>
+        <td>{{ invitation.role }}</td>
+        <td><span class="badge">{{ invitation.status }}</span></td>
+        <td>{{ invitation.invited_by.email }}</td>
+        <td>{{ invitation.expires_at }}</td>
+        <td>
+          {% if invitation.id in accept_links %}
+            <input class="copy-field" readonly value="{{ accept_links|get_item:invitation.id }}">
+          {% else %}
+            -
+          {% endif %}
+        </td>
+        <td>
+          {% if invitation.status == "pending" %}
+            <form method="post" action="{% url 'admin_revoke_invitation' invitation.id %}">
+              {% csrf_token %}
+              <button class="danger" type="submit">Revoke</button>
+            </form>
+          {% endif %}
+        </td>
+      </tr>
+    {% empty %}
+      <tr><td colspan="7">No invitations.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

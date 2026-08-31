@@ -1,0 +1,32 @@
+{% extends "access/base.html" %}
+{% block title %}Login{% endblock %}
+{% block content %}
+<section class="login-screen">
+  <div class="login-copy">
+    <p class="eyebrow">Access Control</p>
+    <h1>Sign in to continue</h1>
+    <p class="muted">Approved users can enter the accounting system. Admins can also manage access requests, invitations, and user status.</p>
+    <div class="login-facts">
+      <span>Secure session</span>
+      <span>Role checked</span>
+      <span>Audit ready</span>
+    </div>
+  </div>
+  <div class="auth-panel login-card">
+    <div class="card-heading">
+      <h2>Welcome back</h2>
+      <p class="muted">Use your approved account.</p>
+    </div>
+    <form method="post" class="form">
+      {% csrf_token %}
+      <input type="hidden" name="next" value="{{ next }}">
+      {{ form.as_p }}
+      <button type="submit">Sign in</button>
+    </form>
+    <div class="auth-footer">
+      <a class="link" href="{% url 'request_access' %}">Request access</a>
+      <a class="link" href="{{ accounting_app_url }}">Accounting app</a>
+    </div>
+  </div>
+</section>
+{% endblock %}

@@ -1,0 +1,13 @@
+{% extends "access/base.html" %}
+{% block title %}Edit User{% endblock %}
+{% block content %}
+<section class="panel">
+  <h1>Edit {{ target.email }}</h1>
+  <form method="post" class="form">
+    {% csrf_token %}
+    {{ form.as_p }}
+    <button type="submit">Save changes</button>
+    <a class="button secondary" href="{% url 'admin_users' %}">Cancel</a>
+  </form>
+</section>
+{% endblock %}

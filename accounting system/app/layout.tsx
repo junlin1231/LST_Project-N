@@ -1,5 +1,6 @@
 import { Analytics } from "@vercel/analytics/next"
 import type { Metadata, Viewport } from "next"
+import { CompanyProvider } from "@/lib/accounting/company-store"
 import { AccountingProvider } from "@/lib/accounting/store"
 import { AppShell } from "@/components/app-shell"
 import "./globals.css"
@@ -24,9 +25,11 @@ export default function RootLayout({
   return (
     <html lang="en" className="bg-background">
       <body className="font-sans antialiased">
-        <AccountingProvider>
-          <AppShell>{children}</AppShell>
-        </AccountingProvider>
+        <CompanyProvider>
+          <AccountingProvider>
+            <AppShell>{children}</AppShell>
+          </AccountingProvider>
+        </CompanyProvider>
         {process.env.NODE_ENV === "production" && <Analytics />}
       </body>
     </html>

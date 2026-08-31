@@ -14,7 +14,7 @@ import {
 } from "@/lib/accounting/rules"
 import type { Invoice, JournalEntry } from "@/lib/accounting/types"
 import { ensureDatabaseReady, query, transaction, type DbExecutor } from "./db"
-import { DEFAULT_COMPANY_ID, getInvoice, insertJournalEntry } from "./accounting-repository"
+import { currentCompanyId, getInvoice, insertJournalEntry } from "./accounting-repository"
 
 interface RuleMappingRow {
   ruleset_name: string
@@ -64,11 +64,17 @@ async function seedDefaultRuleAccounts(db: DbExecutor) {
     { id: "5950", code: "5950", name: "Fuel and Transport Expense", type: "expense" },
   ]
 
-  await exec(db, "INSERT INTO companies (id, name, base_currency) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING", [
-    DEFAULT_COMPANY_ID,
-    "Demo Company",
-    "MYR",
-  ])
+  await exec(
+    db,
+    `INSERT INTO companies (id, name, base_currency, ocr_own_names)
+     VALUES ($1, $2, $3, ARRAY[$2]::TEXT[])
+     ON CONFLICT (id) DO UPDATE
+     SET ocr_own_names = CASE
+       WHEN cardinality(companies.ocr_own_names) = 0 THEN ARRAY[EXCLUDED.name]::TEXT[]
+       ELSE companies.ocr_own_names
+     END`,
+    [currentCompanyId(), "Demo Company", "MYR"],
+  )
 
   for (const account of accounts) {
     await exec(
@@ -76,7 +82,7 @@ async function seedDefaultRuleAccounts(db: DbExecutor) {
       `INSERT INTO accounts (id, company_id, code, name, type)
        VALUES ($1, $2, $3, $4, $5)
        ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, updated_at = NOW()`,
-      [account.id, DEFAULT_COMPANY_ID, account.code, account.name, account.type],
+      [account.id, currentCompanyId(), account.code, account.name, account.type],
     )
   }
 }
@@ -103,7 +109,7 @@ export async function seedDefaultRuleMapping() {
       ON CONFLICT (company_id, ruleset_name, version) DO NOTHING`,
       [
         "rule-map-default-v1",
-        DEFAULT_COMPANY_ID,
+        currentCompanyId(),
         DEFAULT_ACCOUNTING_RULE_CONFIG.rulesetName,
         DEFAULT_ACCOUNTING_RULE_CONFIG.version,
         DEFAULT_ACCOUNTING_RULE_CONFIG.accountsReceivableAccountId,
@@ -134,7 +140,7 @@ export async function getActiveRuleConfig() {
     WHERE company_id = $1 AND is_active = TRUE
     ORDER BY version DESC
     LIMIT 1`,
-    [DEFAULT_COMPANY_ID],
+    [currentCompanyId()],
   )
   return result.rows[0] ? mapRuleConfig(result.rows[0]) : DEFAULT_ACCOUNTING_RULE_CONFIG
 }
@@ -164,7 +170,7 @@ export async function saveRuleExecutionLog(
     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12)`,
     [
       `rule-log-${randomUUID()}`,
-      DEFAULT_COMPANY_ID,
+      currentCompanyId(),
       result.rulesetName,
       result.ruleName,
       result.ruleVersion,

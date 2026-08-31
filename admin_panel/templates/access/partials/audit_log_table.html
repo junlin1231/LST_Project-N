@@ -1,0 +1,19 @@
+<table>
+  <thead><tr><th>Action</th><th>Actor</th><th>Target</th>{% if not compact %}<th>From</th><th>To</th>{% endif %}<th>Created</th></tr></thead>
+  <tbody>
+    {% for log in logs %}
+      <tr>
+        <td>{{ log.action }}</td>
+        <td>{% if log.actor %}{{ log.actor.email }}{% else %}system{% endif %}</td>
+        <td>{% if log.target_email %}{{ log.target_email }}{% elif log.target_user %}{{ log.target_user.email }}{% else %}-{% endif %}</td>
+        {% if not compact %}
+          <td>{{ log.from_role }} {{ log.from_status }}</td>
+          <td>{{ log.to_role }} {{ log.to_status }}</td>
+        {% endif %}
+        <td>{{ log.created_at }}</td>
+      </tr>
+    {% empty %}
+      <tr><td colspan="6">No audit logs.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>

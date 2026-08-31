@@ -10,7 +10,6 @@ export interface ServerEnv {
   aiApiKey?: string
   aiModel: string
   aiProvider: string
-  ownEntityNames: string[]
 }
 
 function localEnvPaths() {
@@ -37,7 +36,6 @@ export function getServerEnvDiagnostics() {
     hasAiApiKey: !!aiApiKey,
     aiModel: envValue(localEnv, "LLM_MODEL", "LLM_GEMMA4_MODEL", "AI_MODEL") ?? "gemma-4",
     aiProvider: (envValue(localEnv, "LLM_PROVIDER") ?? "openai").toLowerCase(),
-    ownEntityNameCount: envList(localEnv, "OCR_OWN_NAMES", "COMPANY_ALIASES", "COMPANY_NAME").length,
   }
 }
 
@@ -64,13 +62,6 @@ function envValue(values: Record<string, string>, ...names: string[]) {
     if (value && value.trim()) return value.trim()
   }
   return undefined
-}
-
-function envList(values: Record<string, string>, ...names: string[]) {
-  return (envValue(values, ...names) ?? "")
-    .split(",")
-    .map((value) => value.trim())
-    .filter(Boolean)
 }
 
 export function getServerEnv(): ServerEnv {
@@ -109,6 +100,5 @@ export function getServerEnv(): ServerEnv {
     aiApiKey: envValue(localEnv, "BEARER_TOKEN", "AI_API_KEY"),
     aiModel: envValue(localEnv, "LLM_MODEL", "LLM_GEMMA4_MODEL", "AI_MODEL") ?? "gemma-4",
     aiProvider: (envValue(localEnv, "LLM_PROVIDER") ?? "openai").toLowerCase(),
-    ownEntityNames: envList(localEnv, "OCR_OWN_NAMES", "COMPANY_ALIASES", "COMPANY_NAME"),
   }
 }

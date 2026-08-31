@@ -1,5 +1,7 @@
-import { NextResponse } from "next/server"
+import { NextRequest, NextResponse } from "next/server"
 import { processDocument } from "@/lib/server/document-repository"
+import { withTenantContext } from "@/lib/server/auth-context"
+import { requireRole } from "@/lib/server/permissions"
 
 export const runtime = "nodejs"
 
@@ -8,10 +10,13 @@ function errorResponse(error: unknown) {
   return NextResponse.json({ error: message }, { status: 500 })
 }
 
-export async function POST(_request: Request, context: { params: Promise<{ id: string }> }) {
+export async function POST(request: NextRequest, context: { params: Promise<{ id: string }> }) {
   try {
-    const { id } = await context.params
-    return NextResponse.json(await processDocument(id))
+    return await withTenantContext(request, async (ctx) => {
+      requireRole(ctx, ["owner", "admin", "accountant", "approver"])
+      const { id } = await context.params
+      return NextResponse.json(await processDocument(id))
+    })
   } catch (error) {
     return errorResponse(error)
   }

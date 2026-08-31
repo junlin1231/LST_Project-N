@@ -6,6 +6,8 @@ import type { JournalLine } from "@/lib/accounting/types"
 import { getActiveRuleConfig } from "./accounting-rule-service"
 import { chatCompletionsUrl, fetchAiJson } from "./ai-endpoint"
 import { getServerEnv } from "./env"
+import { query } from "./db"
+import { currentCompanyId } from "./tenant-context"
 
 export interface CategorizationResult {
   category: DocumentCategory
@@ -116,9 +118,27 @@ function detectTransferDirection(rawText: string, ownAliases: string[]): Transfe
   return null
 }
 
-function inferCategory(text: string): CategoryDecision {
+async function getCompanyOwnEntityNames() {
+  const result = await query<{ name: string; legal_name: string | null; tax_id: string | null; ocr_own_names: string[] }>(
+    `SELECT name, legal_name, tax_id, ocr_own_names
+     FROM companies
+     WHERE id = $1
+     LIMIT 1`,
+    [currentCompanyId()],
+  )
+  const company = result.rows[0]
+  if (!company) return []
+  return Array.from(new Set([
+    company.name,
+    company.legal_name ?? "",
+    company.tax_id ?? "",
+    ...(company.ocr_own_names ?? []),
+  ].map((value) => value.trim()).filter(Boolean)))
+}
+
+function inferCategory(text: string, ownEntityNames: string[]): CategoryDecision {
   const lower = text.toLowerCase()
-  const direction = detectTransferDirection(text, getServerEnv().ownEntityNames)
+  const direction = detectTransferDirection(text, ownEntityNames)
   const looksLikeStatement = lower.includes("bank statement")
     || lower.includes("account details and transaction history")
     || lower.includes("cimb")
@@ -170,10 +190,9 @@ function numberValue(value: unknown, fallback: number) {
   return Number.isFinite(number) ? number : fallback
 }
 
-function refineBankTransferCategory(decision: CategoryDecision, rawText: string): CategoryDecision {
+function refineBankTransferCategory(decision: CategoryDecision, rawText: string, ownEntityNames: string[]): CategoryDecision {
   if (decision.category !== "bank_document" && decision.category !== "unknown") return decision
-  const env = getServerEnv()
-  const direction = detectTransferDirection(rawText, env.ownEntityNames)
+  const direction = detectTransferDirection(rawText, ownEntityNames)
   const lower = rawText.toLowerCase()
   const looksLikeStatement = lower.includes("bank statement")
     || lower.includes("opening balance")
@@ -257,7 +276,7 @@ function expenseAccountFor(category: DocumentCategory, fields: NormalizedDocumen
 async function categorizeWithGemmaEndpoint(input: {
   rawText: string
   extractedFields: Partial<NormalizedDocumentFields>
-}): Promise<CategoryDecision | null> {
+}, ownEntityNames: string[]): Promise<CategoryDecision | null> {
   const env = getServerEnv()
   if (!env.aiBaseUrl) return null
   if (env.aiProvider !== "openai") {
@@ -267,8 +286,8 @@ async function categorizeWithGemmaEndpoint(input: {
   const headers: Record<string, string> = { "Content-Type": "application/json" }
   if (env.aiApiKey) headers.Authorization = `Bearer ${env.aiApiKey}`
 
-  const aliasHint = env.ownEntityNames.length > 0
-    ? `Own company/person aliases for direction detection: ${env.ownEntityNames.join(", ")}. If receiver/payee matches these aliases, classify as receipt_income. If sender/payer/from matches these aliases, classify as receipt_expense.`
+  const aliasHint = ownEntityNames.length > 0
+    ? `Own company/person aliases for direction detection: ${ownEntityNames.join(", ")}. If receiver/payee matches these aliases, classify as receipt_income. If sender/payer/from matches these aliases, classify as receipt_expense.`
     : "If sender/receiver direction is unclear, prefer bank_document for bank records."
   const system = [
     "You categorize OCR accounting documents and receipts.",
@@ -319,10 +338,11 @@ export class MockCategorizationAdapter implements CategorizationAdapter {
   async categorize(input: { rawText: string; extractedFields: Partial<NormalizedDocumentFields> }): Promise<CategorizationResult> {
     const fields = normalizeFields(input.extractedFields)
     const config = await getActiveRuleConfig()
-    const inferred = refineBankTransferCategory(await categorizeWithGemmaEndpoint(input).catch((error) => {
+    const ownEntityNames = await getCompanyOwnEntityNames()
+    const inferred = refineBankTransferCategory(await categorizeWithGemmaEndpoint(input, ownEntityNames).catch((error) => {
       console.error(error)
       return null
-    }) ?? inferCategory(`${input.rawText}\n${fields.documentNumber ?? ""}\n${fields.lineItems.map((line) => line.description).join(" ")}`), input.rawText)
+    }) ?? inferCategory(`${input.rawText}\n${fields.documentNumber ?? ""}\n${fields.lineItems.map((line) => line.description).join(" ")}`, ownEntityNames), input.rawText, ownEntityNames)
     const category = fields.bankTransactions?.length ? "bank_document" : inferred.category
     const expenseDebit = Number(Math.max(0, fields.totalAmount - fields.taxAmount).toFixed(2))
     const suggestedJournalLines: JournalLine[] = buildSuggestedJournalLines(category, fields, config, expenseDebit, input.rawText)

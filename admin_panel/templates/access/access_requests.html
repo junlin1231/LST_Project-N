@@ -1,0 +1,6 @@
+{% extends "access/base.html" %}
+{% block title %}Access Requests{% endblock %}
+{% block content %}
+<header class="page-header"><h1>Access Requests</h1></header>
+{% include "access/partials/access_request_table.html" with requests=requests %}
+{% endblock %}

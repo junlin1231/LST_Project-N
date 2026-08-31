@@ -1,0 +1,30 @@
+{% extends "access/base.html" %}
+{% load access_extras %}
+{% block title %}Users{% endblock %}
+{% block content %}
+<header class="page-header"><h1>Users</h1></header>
+<table>
+  <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Last login</th><th>Password setup</th><th></th></tr></thead>
+  <tbody>
+    {% for item in users %}
+      <tr>
+        <td>{{ item.get_full_name|default:item.username }}</td>
+        <td>{{ item.email }}</td>
+        <td>{{ item.role }}</td>
+        <td><span class="badge">{{ item.status }}</span></td>
+        <td>{{ item.last_login_at|default:"-" }}</td>
+        <td>
+          {% if item.id in setup_links %}
+            <input class="copy-field" readonly value="{{ setup_links|get_item:item.id }}">
+          {% else %}
+            -
+          {% endif %}
+        </td>
+        <td><a href="{% url 'admin_edit_user' item.id %}">Edit</a></td>
+      </tr>
+    {% empty %}
+      <tr><td colspan="7">No users yet.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

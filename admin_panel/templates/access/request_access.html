@@ -1,0 +1,13 @@
+{% extends "access/base.html" %}
+{% block title %}Request Access{% endblock %}
+{% block content %}
+<section class="auth-panel">
+  <h1>Request Access</h1>
+  <form method="post" class="form">
+    {% csrf_token %}
+    {{ form.as_p }}
+    <button type="submit">Submit request</button>
+  </form>
+  <a class="link" href="{% url 'login' %}">Back to login</a>
+</section>
+{% endblock %}

@@ -1,0 +1,21 @@
+{% extends "access/base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block content %}
+<header class="page-header"><h1>Dashboard</h1></header>
+<section class="stats">
+  <article><span>{{ pending_count }}</span><p>Pending requests</p></article>
+  <article><span>{{ active_users }}</span><p>Active users</p></article>
+  <article><span>{{ disabled_users }}</span><p>Disabled users</p></article>
+  <article><span>{{ admin_users }}</span><p>Admin users</p></article>
+</section>
+<section class="grid-two">
+  <div>
+    <h2>Recent Requests</h2>
+    {% include "access/partials/access_request_table.html" with requests=pending_requests compact=True %}
+  </div>
+  <div>
+    <h2>Recent Audit Logs</h2>
+    {% include "access/partials/audit_log_table.html" with logs=recent_logs compact=True %}
+  </div>
+</section>
+{% endblock %}

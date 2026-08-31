@@ -1,0 +1,31 @@
+<table>
+  <thead><tr><th>Name</th><th>Email</th><th>Status</th>{% if not compact %}<th>Reason</th><th>Requested</th><th></th>{% endif %}</tr></thead>
+  <tbody>
+    {% for request in requests %}
+      <tr>
+        <td>{{ request.name }}</td>
+        <td>{{ request.email }}</td>
+        <td><span class="badge">{{ request.status }}</span></td>
+        {% if not compact %}
+          <td>{{ request.reason|default:"-" }}</td>
+          <td>{{ request.requested_at }}</td>
+          <td class="actions">
+            {% if request.status == "pending" %}
+              <form method="post" action="{% url 'admin_review_access_request' request.id 'approve' %}">
+                {% csrf_token %}
+                <button type="submit">Approve</button>
+              </form>
+              <form method="post" action="{% url 'admin_review_access_request' request.id 'reject' %}">
+                {% csrf_token %}
+                <input name="reason" placeholder="Reason">
+                <button class="danger" type="submit">Reject</button>
+              </form>
+            {% endif %}
+          </td>
+        {% endif %}
+      </tr>
+    {% empty %}
+      <tr><td colspan="6">No access requests.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>

@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { updateDocumentDraft } from "@/lib/server/document-repository"
+import { withTenantContext } from "@/lib/server/auth-context"
+import { requireRole } from "@/lib/server/permissions"
 
 export const runtime = "nodejs"
 
@@ -10,9 +12,12 @@ function errorResponse(error: unknown) {
 
 export async function PATCH(request: NextRequest, context: { params: Promise<{ id: string }> }) {
   try {
-    const { id } = await context.params
-    const body = await request.json()
-    return NextResponse.json(await updateDocumentDraft(id, body))
+    return await withTenantContext(request, async (ctx) => {
+      requireRole(ctx, ["owner", "admin", "accountant", "approver"])
+      const { id } = await context.params
+      const body = await request.json()
+      return NextResponse.json(await updateDocumentDraft(id, body))
+    })
   } catch (error) {
     return errorResponse(error)
   }

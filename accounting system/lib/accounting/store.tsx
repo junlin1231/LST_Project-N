@@ -32,6 +32,7 @@ import {
   type AccountBalance,
   type MonthlyPoint,
 } from "./calculations"
+import { useCompany } from "./company-store"
 
 interface Store {
   accounts: Account[]
@@ -123,6 +124,7 @@ async function postAccountingAction<T>(payload: Record<string, unknown>): Promis
 }
 
 export function AccountingProvider({ children }: { children: ReactNode }) {
+  const { activeCompany } = useCompany()
   const [accounts, setAccounts] = useState<Account[]>([])
   const [journalEntries, setJournalEntries] = useState<JournalEntry[]>([])
   const [invoices, setInvoices] = useState<Invoice[]>([])
@@ -165,8 +167,9 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
   }, [])
 
   useEffect(() => {
+    if (!activeCompany) return
     void refresh()
-  }, [refresh])
+  }, [refresh, activeCompany?.id])
 
   const addJournalEntry = useCallback((entry: Omit<JournalEntry, "id">, confirmation: ConfirmationMetadata) => {
     void postAccountingAction<JournalEntry>({ action: "createJournalEntry", entry, confirmation })

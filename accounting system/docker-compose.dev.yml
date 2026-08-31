@@ -27,6 +27,9 @@ services:
       NODE_ENV: development
       NEXT_TELEMETRY_DISABLED: '1'
       DATABASE_URL: postgresql://accounting:accounting@db:5432/accounting
+      AUTH_SHARED_SECRET: ${AUTH_SHARED_SECRET:-dev-only-change-me}
+      ACCESS_COOKIE_NAME: ${ACCESS_COOKIE_NAME:-lst_access_token}
+      DJANGO_LOGIN_URL: ${DJANGO_LOGIN_URL:-http://localhost:8000/login/}
       AUTO_MIGRATE: '1'
       DOCUMENT_STORAGE_ROOT: /app/data/scanned_docs
       OCR_STORAGE_DIR: /app/ocr/scanned_docs

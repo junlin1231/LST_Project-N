@@ -55,12 +55,13 @@ import type {
 } from "@/lib/accounting/types"
 import { buildDepreciationScheduleDrafts, buildPeriodClosePreview, DEFAULT_RETAINED_EARNINGS_ACCOUNT_ID } from "@/lib/accounting/reports"
 import { DEFAULT_ACCOUNTING_RULE_CONFIG, roundMoney } from "@/lib/accounting/rules"
+import { currentCompanyId, currentUserId, DEMO_COMPANY_ID, DEMO_USER_ID } from "./auth-context"
 import { ensureDatabaseReady, query, transaction, type DbExecutor } from "./db"
 
-const DEFAULT_COMPANY_ID = "company-demo"
-const DEFAULT_USER_ID = "user-demo-admin"
+const DEFAULT_COMPANY_ID = DEMO_COMPANY_ID
+const DEFAULT_USER_ID = DEMO_USER_ID
 
-export { DEFAULT_COMPANY_ID, DEFAULT_USER_ID }
+export { DEFAULT_COMPANY_ID, DEFAULT_USER_ID, currentCompanyId, currentUserId }
 
 function ocrStorageRoot() {
   if (process.env.OCR_STORAGE_DIR?.trim()) return path.resolve(process.env.OCR_STORAGE_DIR.trim())
@@ -564,8 +565,8 @@ async function insertAuditLog(
     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)`,
     [
       `audit-${randomUUID()}`,
-      DEFAULT_COMPANY_ID,
-      DEFAULT_USER_ID,
+      currentCompanyId(),
+      currentUserId(),
       action,
       entityType,
       entityId,
@@ -603,8 +604,8 @@ async function insertSupervisorOverride(
     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)`,
     [
       `override-${randomUUID()}`,
-      DEFAULT_COMPANY_ID,
-      DEFAULT_USER_ID,
+      currentCompanyId(),
+      currentUserId(),
       authorization.supervisorId,
       action,
       entityType,
@@ -623,7 +624,7 @@ async function assertPeriodAllowsPosting(db: DbExecutor, date: string, confirmat
      WHERE company_id = $1 AND $2::date BETWEEN start_date AND end_date
      ORDER BY start_date DESC
      LIMIT 1`,
-    [DEFAULT_COMPANY_ID, date],
+    [currentCompanyId(), date],
   )
   const period = result.rows[0] as { id: string; name: string; status: "open" | "closed" } | undefined
   if (period?.status !== "closed") return
@@ -644,14 +645,20 @@ export async function seedDemoData() {
 async function ensureDemoCompany() {
   await ensureDatabaseReady()
   await transaction(async (client) => {
-    await exec(client, "INSERT INTO companies (id, name, base_currency) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING", [
-      DEFAULT_COMPANY_ID,
-      "Demo Company",
-      "MYR",
-    ])
+    await exec(
+      client,
+      `INSERT INTO companies (id, name, base_currency, ocr_own_names)
+       VALUES ($1, $2, $3, ARRAY[$2]::TEXT[])
+       ON CONFLICT (id) DO UPDATE
+       SET ocr_own_names = CASE
+         WHEN cardinality(companies.ocr_own_names) = 0 THEN ARRAY[EXCLUDED.name]::TEXT[]
+         ELSE companies.ocr_own_names
+       END`,
+      [currentCompanyId(), "Demo Company", "MYR"],
+    )
     await exec(client, "INSERT INTO users (id, company_id, name, email, role) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (id) DO NOTHING", [
-      DEFAULT_USER_ID,
-      DEFAULT_COMPANY_ID,
+      currentUserId(),
+      currentCompanyId(),
       "Demo Admin",
       "admin@example.com",
       "admin",
@@ -664,17 +671,17 @@ export async function loadDemoData() {
   await ensureDemoCompany()
 
   await transaction(async (client) => {
-    await exec(client, "DELETE FROM invoices WHERE company_id = $1 AND id = ANY($2)", [DEFAULT_COMPANY_ID, demoInvoices.map((invoice) => invoice.id)])
-    await exec(client, "DELETE FROM vendor_bills WHERE company_id = $1 AND id = ANY($2)", [DEFAULT_COMPANY_ID, demoVendorBills.map((bill) => bill.id)])
-    await exec(client, "DELETE FROM payment_allocations WHERE company_id = $1 AND id = ANY($2)", [DEFAULT_COMPANY_ID, demoPaymentAllocations.map((allocation) => allocation.id)])
-    await exec(client, "DELETE FROM receipts WHERE company_id = $1 AND id = ANY($2)", [DEFAULT_COMPANY_ID, demoReceipts.map((receipt) => receipt.id)])
-    await exec(client, "DELETE FROM payment_vouchers WHERE company_id = $1 AND id = ANY($2)", [DEFAULT_COMPANY_ID, demoPaymentVouchers.map((voucher) => voucher.id)])
-    await exec(client, "DELETE FROM workflow_document_lines WHERE company_id = $1 AND workflow_document_id = ANY($2)", [DEFAULT_COMPANY_ID, demoWorkflowDocuments.map((document) => document.id)])
-    await exec(client, "DELETE FROM workflow_documents WHERE company_id = $1 AND id = ANY($2)", [DEFAULT_COMPANY_ID, demoWorkflowDocuments.map((document) => document.id)])
-    await exec(client, "DELETE FROM depreciation_schedules WHERE company_id = $1 AND asset_id = ANY($2)", [DEFAULT_COMPANY_ID, demoFixedAssets.map((asset) => asset.id)])
-    await exec(client, "DELETE FROM fixed_assets WHERE company_id = $1 AND id = ANY($2)", [DEFAULT_COMPANY_ID, demoFixedAssets.map((asset) => asset.id)])
+    await exec(client, "DELETE FROM invoices WHERE company_id = $1 AND id = ANY($2)", [currentCompanyId(), demoInvoices.map((invoice) => invoice.id)])
+    await exec(client, "DELETE FROM vendor_bills WHERE company_id = $1 AND id = ANY($2)", [currentCompanyId(), demoVendorBills.map((bill) => bill.id)])
+    await exec(client, "DELETE FROM payment_allocations WHERE company_id = $1 AND id = ANY($2)", [currentCompanyId(), demoPaymentAllocations.map((allocation) => allocation.id)])
+    await exec(client, "DELETE FROM receipts WHERE company_id = $1 AND id = ANY($2)", [currentCompanyId(), demoReceipts.map((receipt) => receipt.id)])
+    await exec(client, "DELETE FROM payment_vouchers WHERE company_id = $1 AND id = ANY($2)", [currentCompanyId(), demoPaymentVouchers.map((voucher) => voucher.id)])
+    await exec(client, "DELETE FROM workflow_document_lines WHERE company_id = $1 AND workflow_document_id = ANY($2)", [currentCompanyId(), demoWorkflowDocuments.map((document) => document.id)])
+    await exec(client, "DELETE FROM workflow_documents WHERE company_id = $1 AND id = ANY($2)", [currentCompanyId(), demoWorkflowDocuments.map((document) => document.id)])
+    await exec(client, "DELETE FROM depreciation_schedules WHERE company_id = $1 AND asset_id = ANY($2)", [currentCompanyId(), demoFixedAssets.map((asset) => asset.id)])
+    await exec(client, "DELETE FROM fixed_assets WHERE company_id = $1 AND id = ANY($2)", [currentCompanyId(), demoFixedAssets.map((asset) => asset.id)])
     await exec(client, "DELETE FROM journal_entries WHERE company_id = $1 AND id = ANY($2)", [
-      DEFAULT_COMPANY_ID,
+      currentCompanyId(),
       demoJournalEntries.map((entry) => entry.id),
     ])
 
@@ -684,7 +691,7 @@ export async function loadDemoData() {
         `INSERT INTO accounts (id, company_id, code, name, type)
          VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (id) DO UPDATE SET code = EXCLUDED.code, name = EXCLUDED.name, type = EXCLUDED.type, updated_at = NOW()`,
-        [account.id, DEFAULT_COMPANY_ID, account.code, account.name, account.type],
+        [account.id, currentCompanyId(), account.code, account.name, account.type],
       )
     }
 
@@ -703,7 +710,7 @@ export async function loadDemoData() {
           updated_at = NOW()`,
         [
           contact.id,
-          DEFAULT_COMPANY_ID,
+          currentCompanyId(),
           contact.name,
           contact.type,
           contact.email,
@@ -750,7 +757,7 @@ export async function loadDemoData() {
           updated_at = NOW()`,
         [
           item.id,
-          DEFAULT_COMPANY_ID,
+          currentCompanyId(),
           item.sku,
           item.name,
           item.description,
@@ -777,7 +784,7 @@ export async function loadDemoData() {
           name = EXCLUDED.name,
           status = EXCLUDED.status,
           updated_at = NOW()`,
-        [warehouse.id, DEFAULT_COMPANY_ID, warehouse.code, warehouse.name, warehouse.status],
+        [warehouse.id, currentCompanyId(), warehouse.code, warehouse.name, warehouse.status],
       )
     }
 
@@ -822,45 +829,45 @@ export async function loadDemoData() {
 export async function resetSystemData() {
   await ensureDatabaseReady()
   await ensureDemoCompany()
-  const ocrStorageDir = path.join(documentStorageRoot(), DEFAULT_COMPANY_ID)
+  const ocrStorageDir = path.join(documentStorageRoot(), currentCompanyId())
   await transaction(async (client) => {
-    await exec(client, "DELETE FROM posting_confirmations WHERE company_id = $1", [DEFAULT_COMPANY_ID])
-    await exec(client, "DELETE FROM document_accounting_drafts WHERE company_id = $1", [DEFAULT_COMPANY_ID])
-    await exec(client, "DELETE FROM document_categories WHERE company_id = $1", [DEFAULT_COMPANY_ID])
-    await exec(client, "DELETE FROM document_extractions WHERE company_id = $1", [DEFAULT_COMPANY_ID])
-    await exec(client, "DELETE FROM documents WHERE company_id = $1", [DEFAULT_COMPANY_ID])
-    await exec(client, "DELETE FROM stock_movement_lines WHERE stock_movement_id IN (SELECT id FROM stock_movements WHERE company_id = $1)", [DEFAULT_COMPANY_ID])
-    await exec(client, "DELETE FROM stock_movements WHERE company_id = $1", [DEFAULT_COMPANY_ID])
-    await exec(client, "DELETE FROM stock_balances WHERE company_id = $1", [DEFAULT_COMPANY_ID])
-    await exec(client, "DELETE FROM e_invoice_submissions WHERE company_id = $1", [DEFAULT_COMPANY_ID])
-    await exec(client, "DELETE FROM tax_return_runs WHERE company_id = $1", [DEFAULT_COMPANY_ID])
-    await exec(client, "DELETE FROM tax_codes WHERE company_id = $1", [DEFAULT_COMPANY_ID])
-    await exec(client, "DELETE FROM budget_allocations WHERE company_id = $1", [DEFAULT_COMPANY_ID])
-    await exec(client, "DELETE FROM payroll_runs WHERE company_id = $1", [DEFAULT_COMPANY_ID])
-    await exec(client, "DELETE FROM depreciation_schedules WHERE company_id = $1", [DEFAULT_COMPANY_ID])
-    await exec(client, "DELETE FROM fixed_assets WHERE company_id = $1", [DEFAULT_COMPANY_ID])
-    await exec(client, "DELETE FROM workflow_document_lines WHERE company_id = $1", [DEFAULT_COMPANY_ID])
-    await exec(client, "DELETE FROM workflow_documents WHERE company_id = $1", [DEFAULT_COMPANY_ID])
-    await exec(client, "DELETE FROM warehouse_bins WHERE warehouse_id IN (SELECT id FROM warehouses WHERE company_id = $1)", [DEFAULT_COMPANY_ID])
-    await exec(client, "DELETE FROM warehouses WHERE company_id = $1", [DEFAULT_COMPANY_ID])
-    await exec(client, "DELETE FROM inventory_items WHERE company_id = $1", [DEFAULT_COMPANY_ID])
-    await exec(client, "DELETE FROM bank_reconciliations WHERE company_id = $1", [DEFAULT_COMPANY_ID])
-    await exec(client, "DELETE FROM bank_statement_imports WHERE company_id = $1", [DEFAULT_COMPANY_ID])
-    await exec(client, "DELETE FROM bank_accounts WHERE company_id = $1", [DEFAULT_COMPANY_ID])
-    await exec(client, "DELETE FROM payment_allocations WHERE company_id = $1", [DEFAULT_COMPANY_ID])
-    await exec(client, "DELETE FROM payment_vouchers WHERE company_id = $1", [DEFAULT_COMPANY_ID])
-    await exec(client, "DELETE FROM receipts WHERE company_id = $1", [DEFAULT_COMPANY_ID])
-    await exec(client, "DELETE FROM vendor_bills WHERE company_id = $1", [DEFAULT_COMPANY_ID])
-    await exec(client, "DELETE FROM retained_earnings_closing_runs WHERE company_id = $1", [DEFAULT_COMPANY_ID])
-    await exec(client, "DELETE FROM supervisor_overrides WHERE company_id = $1", [DEFAULT_COMPANY_ID])
-    await exec(client, "DELETE FROM rule_execution_logs WHERE company_id = $1", [DEFAULT_COMPANY_ID])
-    await exec(client, "DELETE FROM accounting_rule_mappings WHERE company_id = $1", [DEFAULT_COMPANY_ID])
-    await exec(client, "DELETE FROM audit_logs WHERE company_id = $1", [DEFAULT_COMPANY_ID])
-    await exec(client, "DELETE FROM invoices WHERE company_id = $1", [DEFAULT_COMPANY_ID])
-    await exec(client, "DELETE FROM journal_entries WHERE company_id = $1", [DEFAULT_COMPANY_ID])
-    await exec(client, "DELETE FROM contacts WHERE company_id = $1", [DEFAULT_COMPANY_ID])
-    await exec(client, "DELETE FROM accounts WHERE company_id = $1", [DEFAULT_COMPANY_ID])
-    await exec(client, "DELETE FROM accounting_periods WHERE company_id = $1", [DEFAULT_COMPANY_ID])
+    await exec(client, "DELETE FROM posting_confirmations WHERE company_id = $1", [currentCompanyId()])
+    await exec(client, "DELETE FROM document_accounting_drafts WHERE company_id = $1", [currentCompanyId()])
+    await exec(client, "DELETE FROM document_categories WHERE company_id = $1", [currentCompanyId()])
+    await exec(client, "DELETE FROM document_extractions WHERE company_id = $1", [currentCompanyId()])
+    await exec(client, "DELETE FROM documents WHERE company_id = $1", [currentCompanyId()])
+    await exec(client, "DELETE FROM stock_movement_lines WHERE stock_movement_id IN (SELECT id FROM stock_movements WHERE company_id = $1)", [currentCompanyId()])
+    await exec(client, "DELETE FROM stock_movements WHERE company_id = $1", [currentCompanyId()])
+    await exec(client, "DELETE FROM stock_balances WHERE company_id = $1", [currentCompanyId()])
+    await exec(client, "DELETE FROM e_invoice_submissions WHERE company_id = $1", [currentCompanyId()])
+    await exec(client, "DELETE FROM tax_return_runs WHERE company_id = $1", [currentCompanyId()])
+    await exec(client, "DELETE FROM tax_codes WHERE company_id = $1", [currentCompanyId()])
+    await exec(client, "DELETE FROM budget_allocations WHERE company_id = $1", [currentCompanyId()])
+    await exec(client, "DELETE FROM payroll_runs WHERE company_id = $1", [currentCompanyId()])
+    await exec(client, "DELETE FROM depreciation_schedules WHERE company_id = $1", [currentCompanyId()])
+    await exec(client, "DELETE FROM fixed_assets WHERE company_id = $1", [currentCompanyId()])
+    await exec(client, "DELETE FROM workflow_document_lines WHERE company_id = $1", [currentCompanyId()])
+    await exec(client, "DELETE FROM workflow_documents WHERE company_id = $1", [currentCompanyId()])
+    await exec(client, "DELETE FROM warehouse_bins WHERE warehouse_id IN (SELECT id FROM warehouses WHERE company_id = $1)", [currentCompanyId()])
+    await exec(client, "DELETE FROM warehouses WHERE company_id = $1", [currentCompanyId()])
+    await exec(client, "DELETE FROM inventory_items WHERE company_id = $1", [currentCompanyId()])
+    await exec(client, "DELETE FROM bank_reconciliations WHERE company_id = $1", [currentCompanyId()])
+    await exec(client, "DELETE FROM bank_statement_imports WHERE company_id = $1", [currentCompanyId()])
+    await exec(client, "DELETE FROM bank_accounts WHERE company_id = $1", [currentCompanyId()])
+    await exec(client, "DELETE FROM payment_allocations WHERE company_id = $1", [currentCompanyId()])
+    await exec(client, "DELETE FROM payment_vouchers WHERE company_id = $1", [currentCompanyId()])
+    await exec(client, "DELETE FROM receipts WHERE company_id = $1", [currentCompanyId()])
+    await exec(client, "DELETE FROM vendor_bills WHERE company_id = $1", [currentCompanyId()])
+    await exec(client, "DELETE FROM retained_earnings_closing_runs WHERE company_id = $1", [currentCompanyId()])
+    await exec(client, "DELETE FROM supervisor_overrides WHERE company_id = $1", [currentCompanyId()])
+    await exec(client, "DELETE FROM rule_execution_logs WHERE company_id = $1", [currentCompanyId()])
+    await exec(client, "DELETE FROM accounting_rule_mappings WHERE company_id = $1", [currentCompanyId()])
+    await exec(client, "DELETE FROM audit_logs WHERE company_id = $1", [currentCompanyId()])
+    await exec(client, "DELETE FROM invoices WHERE company_id = $1", [currentCompanyId()])
+    await exec(client, "DELETE FROM journal_entries WHERE company_id = $1", [currentCompanyId()])
+    await exec(client, "DELETE FROM contacts WHERE company_id = $1", [currentCompanyId()])
+    await exec(client, "DELETE FROM accounts WHERE company_id = $1", [currentCompanyId()])
+    await exec(client, "DELETE FROM accounting_periods WHERE company_id = $1", [currentCompanyId()])
   })
   await fs.rm(ocrStorageDir, { recursive: true, force: true })
   await fs.mkdir(ocrStorageDir, { recursive: true })
@@ -886,7 +893,7 @@ export async function insertJournalEntry(db: DbExecutor, entry: JournalEntry) {
     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
     [
       entry.id,
-      DEFAULT_COMPANY_ID,
+      currentCompanyId(),
       entry.date,
       entry.description,
       entry.reference ?? null,
@@ -922,7 +929,7 @@ async function ensurePostingAccounts(db: DbExecutor) {
       `INSERT INTO accounts (id, company_id, code, name, type)
        VALUES ($1, $2, $3, $4, $5)
        ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, updated_at = NOW()`,
-      [account.id, DEFAULT_COMPANY_ID, account.code, account.name, account.type],
+      [account.id, currentCompanyId(), account.code, account.name, account.type],
     )
   }
 }
@@ -1002,7 +1009,7 @@ async function insertInvoice(db: DbExecutor, invoice: Invoice) {
   await exec(
     db,
     "INSERT INTO invoices (id, company_id, number, client_id, issue_date, due_date, status, tax_rate) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-    [invoice.id, DEFAULT_COMPANY_ID, invoice.number, invoice.clientId, invoice.issueDate, invoice.dueDate, invoice.status, invoice.taxRate],
+    [invoice.id, currentCompanyId(), invoice.number, invoice.clientId, invoice.issueDate, invoice.dueDate, invoice.status, invoice.taxRate],
   )
 
   for (const item of invoice.items) {
@@ -1031,7 +1038,7 @@ async function insertVendorBill(db: DbExecutor, bill: VendorBill) {
     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
     [
       bill.id,
-      DEFAULT_COMPANY_ID,
+      currentCompanyId(),
       bill.vendorId,
       bill.billNumber,
       bill.billDate,
@@ -1059,7 +1066,7 @@ async function insertReceipt(db: DbExecutor, receipt: Receipt) {
       updated_at = NOW()`,
     [
       receipt.id,
-      DEFAULT_COMPANY_ID,
+      currentCompanyId(),
       receipt.invoiceId ?? null,
       receipt.journalEntryId ?? null,
       receipt.receiptNumber,
@@ -1085,7 +1092,7 @@ async function insertPaymentVoucher(db: DbExecutor, voucher: PaymentVoucher) {
       updated_at = NOW()`,
     [
       voucher.id,
-      DEFAULT_COMPANY_ID,
+      currentCompanyId(),
       voucher.vendorBillId ?? null,
       voucher.journalEntryId ?? null,
       voucher.voucherNumber,
@@ -1104,7 +1111,7 @@ async function insertPaymentAllocation(db: DbExecutor, allocation: PaymentAlloca
      ON CONFLICT (id) DO NOTHING`,
     [
       allocation.id,
-      DEFAULT_COMPANY_ID,
+      currentCompanyId(),
       allocation.sourceType,
       allocation.sourceId,
       allocation.targetType,
@@ -1137,7 +1144,7 @@ async function insertWorkflowDocument(db: DbExecutor, document: WorkflowDocument
       source_document_id = EXCLUDED.source_document_id`,
     [
       document.id,
-      DEFAULT_COMPANY_ID,
+      currentCompanyId(),
       document.documentType,
       document.documentNumber,
       document.contactId ?? null,
@@ -1151,7 +1158,7 @@ async function insertWorkflowDocument(db: DbExecutor, document: WorkflowDocument
 }
 
 async function replaceWorkflowDocumentLines(db: DbExecutor, documentId: string, lines: WorkflowDocumentLine[]) {
-  await exec(db, "DELETE FROM workflow_document_lines WHERE company_id = $1 AND workflow_document_id = $2", [DEFAULT_COMPANY_ID, documentId])
+  await exec(db, "DELETE FROM workflow_document_lines WHERE company_id = $1 AND workflow_document_id = $2", [currentCompanyId(), documentId])
   for (const [index, line] of lines.entries()) {
     const lineTotal = Number((line.quantity * line.unitPrice).toFixed(2))
     const taxAmount = Number((lineTotal * line.taxRate).toFixed(2))
@@ -1173,7 +1180,7 @@ async function replaceWorkflowDocumentLines(db: DbExecutor, documentId: string, 
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
       [
         line.id || `wf-line-${randomUUID()}`,
-        DEFAULT_COMPANY_ID,
+        currentCompanyId(),
         documentId,
         index + 1,
         line.itemId ?? null,
@@ -1224,7 +1231,7 @@ async function insertFixedAsset(db: DbExecutor, asset: FixedAsset) {
       updated_at = NOW()`,
     [
       asset.id,
-      DEFAULT_COMPANY_ID,
+      currentCompanyId(),
       asset.assetNumber,
       asset.name,
       asset.purchaseDate,
@@ -1253,7 +1260,7 @@ async function insertDepreciationSchedule(db: DbExecutor, schedule: Depreciation
       status = EXCLUDED.status`,
     [
       schedule.id,
-      DEFAULT_COMPANY_ID,
+      currentCompanyId(),
       schedule.assetId,
       schedule.periodDate,
       schedule.depreciationAmount,
@@ -1268,38 +1275,38 @@ export async function listAccountingData() {
   await ensureDemoCompany()
 
   const [accounts, contacts, journalEntries, journalLines, invoices, invoiceItems, vendorBills, receipts, paymentVouchers, paymentAllocations, workflowDocuments, workflowDocumentLines, stockItems, warehouses, stockBalances, stockMovements, stockMovementLines, fixedAssets, depreciationSchedules, auditLogs] = await Promise.all([
-    query<AccountRow>("SELECT id, code, name, type FROM accounts WHERE company_id = $1 ORDER BY code", [DEFAULT_COMPANY_ID]),
-    query<ContactRow>("SELECT id, name, type, email, phone, tax_id, credit_limit::text FROM contacts WHERE company_id = $1 ORDER BY name", [DEFAULT_COMPANY_ID]),
+    query<AccountRow>("SELECT id, code, name, type FROM accounts WHERE company_id = $1 ORDER BY code", [currentCompanyId()]),
+    query<ContactRow>("SELECT id, name, type, email, phone, tax_id, credit_limit::text FROM contacts WHERE company_id = $1 ORDER BY name", [currentCompanyId()]),
     query<JournalEntryRow>(
       "SELECT id, date::text, description, reference, status, posted_at::text, reversed_journal_entry_id, adjusted_journal_entry_id FROM journal_entries WHERE company_id = $1 ORDER BY date DESC, created_at DESC",
-      [DEFAULT_COMPANY_ID],
+      [currentCompanyId()],
     ),
     query<JournalLineRow>("SELECT journal_entry_id, account_id, debit::text, credit::text FROM journal_lines ORDER BY created_at, id"),
-    query<InvoiceRow>("SELECT id, number, client_id, issue_date::text, due_date::text, status, tax_rate::text FROM invoices WHERE company_id = $1 ORDER BY issue_date DESC", [DEFAULT_COMPANY_ID]),
+    query<InvoiceRow>("SELECT id, number, client_id, issue_date::text, due_date::text, status, tax_rate::text FROM invoices WHERE company_id = $1 ORDER BY issue_date DESC", [currentCompanyId()]),
     query<InvoiceItemRow>("SELECT invoice_id, id, description, quantity::text, unit_price::text FROM invoice_items ORDER BY created_at, id"),
     query<VendorBillRow>(
       "SELECT id, vendor_id, bill_number, bill_date::text, due_date::text, status, subtotal::text, tax_amount::text, total_amount::text FROM vendor_bills WHERE company_id = $1 ORDER BY bill_date DESC, created_at DESC",
-      [DEFAULT_COMPANY_ID],
+      [currentCompanyId()],
     ),
     query<ReceiptRow>(
       "SELECT id, invoice_id, journal_entry_id, receipt_number, receipt_date::text, amount::text, status FROM receipts WHERE company_id = $1 ORDER BY receipt_date DESC, created_at DESC",
-      [DEFAULT_COMPANY_ID],
+      [currentCompanyId()],
     ),
     query<PaymentVoucherRow>(
       "SELECT id, vendor_bill_id, journal_entry_id, voucher_number, payment_date::text, amount::text, status FROM payment_vouchers WHERE company_id = $1 ORDER BY payment_date DESC, created_at DESC",
-      [DEFAULT_COMPANY_ID],
+      [currentCompanyId()],
     ),
     query<PaymentAllocationRow>(
       "SELECT id, source_type, source_id, target_type, target_id, amount::text, allocated_at::text FROM payment_allocations WHERE company_id = $1 ORDER BY allocated_at DESC",
-      [DEFAULT_COMPANY_ID],
+      [currentCompanyId()],
     ),
     query<WorkflowDocumentRow>(
       "SELECT id, document_type, document_number, contact_id, status, document_date::text, total_amount::text, source_document_id FROM workflow_documents WHERE company_id = $1 ORDER BY document_date DESC, created_at DESC",
-      [DEFAULT_COMPANY_ID],
+      [currentCompanyId()],
     ),
     query<WorkflowDocumentLineRow>(
       "SELECT id, workflow_document_id, item_id, warehouse_id, description, quantity::text, unit_price::text, tax_rate::text, tax_amount::text, line_total::text FROM workflow_document_lines WHERE company_id = $1 ORDER BY workflow_document_id, line_no, created_at",
-      [DEFAULT_COMPANY_ID],
+      [currentCompanyId()],
     ),
     query<StockItemRow>(
       `SELECT
@@ -1319,16 +1326,16 @@ export async function listAccountingData() {
        FROM inventory_items
        WHERE company_id = $1
        ORDER BY sku`,
-      [DEFAULT_COMPANY_ID],
+      [currentCompanyId()],
     ),
-    query<WarehouseRow>("SELECT id, code, name, status FROM warehouses WHERE company_id = $1 ORDER BY code", [DEFAULT_COMPANY_ID]),
+    query<WarehouseRow>("SELECT id, code, name, status FROM warehouses WHERE company_id = $1 ORDER BY code", [currentCompanyId()]),
     query<StockBalanceRow>(
       "SELECT id, item_id, warehouse_id, quantity_on_hand::text, inventory_value::text, average_unit_cost::text FROM stock_balances WHERE company_id = $1 ORDER BY updated_at DESC",
-      [DEFAULT_COMPANY_ID],
+      [currentCompanyId()],
     ),
     query<StockMovementRow>(
       "SELECT id, movement_no, movement_type, movement_date::text, source_type, source_id, status, posted_at::text FROM stock_movements WHERE company_id = $1 ORDER BY movement_date DESC, created_at DESC",
-      [DEFAULT_COMPANY_ID],
+      [currentCompanyId()],
     ),
     query<StockMovementLineRow>(
       "SELECT id, stock_movement_id, item_id, warehouse_id, quantity_in::text, quantity_out::text, unit_cost::text, total_cost::text, memo FROM stock_movement_lines ORDER BY created_at, id",
@@ -1351,15 +1358,15 @@ export async function listAccountingData() {
        FROM fixed_assets
        WHERE company_id = $1
        ORDER BY asset_number`,
-      [DEFAULT_COMPANY_ID],
+      [currentCompanyId()],
     ),
     query<DepreciationScheduleRow>(
       "SELECT id, asset_id, period_date::text, depreciation_amount::text, journal_entry_id, status FROM depreciation_schedules WHERE company_id = $1 ORDER BY period_date DESC",
-      [DEFAULT_COMPANY_ID],
+      [currentCompanyId()],
     ),
     query<AuditLogRow>(
       "SELECT id, action, entity_type, entity_id, impact_summary, reason, confirmation_phrase, metadata, created_at::text FROM audit_logs WHERE company_id = $1 ORDER BY created_at DESC LIMIT 100",
-      [DEFAULT_COMPANY_ID],
+      [currentCompanyId()],
     ),
   ])
 
@@ -1389,7 +1396,7 @@ export async function getInvoice(id: string) {
 
   const invoices = await query<InvoiceRow>(
     "SELECT id, number, client_id, issue_date::text, due_date::text, status, tax_rate::text FROM invoices WHERE id = $1 AND company_id = $2",
-    [id, DEFAULT_COMPANY_ID],
+    [id, currentCompanyId()],
   )
   if (!invoices.rows[0]) return null
 
@@ -1407,7 +1414,7 @@ export async function getJournalEntry(id: string) {
 
   const entries = await query<JournalEntryRow>(
     "SELECT id, date::text, description, reference, status, posted_at::text, reversed_journal_entry_id, adjusted_journal_entry_id FROM journal_entries WHERE id = $1 AND company_id = $2",
-    [id, DEFAULT_COMPANY_ID],
+    [id, currentCompanyId()],
   )
   if (!entries.rows[0]) return null
 
@@ -1425,7 +1432,7 @@ export async function createAccount(account: Omit<Account, "id">) {
   const id = account.code
   await query(
     "INSERT INTO accounts (id, company_id, code, name, type) VALUES ($1, $2, $3, $4, $5)",
-    [id, DEFAULT_COMPANY_ID, account.code, account.name, account.type],
+    [id, currentCompanyId(), account.code, account.name, account.type],
   )
   return { ...account, id }
 }
@@ -1438,7 +1445,7 @@ export async function createContact(contact: Omit<Contact, "id">) {
     "INSERT INTO contacts (id, company_id, name, type, email, phone, tax_id, credit_limit) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
     [
       id,
-      DEFAULT_COMPANY_ID,
+      currentCompanyId(),
       contact.name,
       contact.type,
       contact.email,
@@ -1473,7 +1480,7 @@ export async function createStockItem(item: Omit<StockItem, "id">) {
     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
     [
       id,
-      DEFAULT_COMPANY_ID,
+      currentCompanyId(),
       item.sku,
       item.name,
       item.description,
@@ -1497,7 +1504,7 @@ export async function createWarehouse(warehouse: Omit<Warehouse, "id">) {
   const id = `wh-${randomUUID()}`
   await query(
     "INSERT INTO warehouses (id, company_id, code, name, status) VALUES ($1, $2, $3, $4, $5)",
-    [id, DEFAULT_COMPANY_ID, warehouse.code, warehouse.name, warehouse.status],
+    [id, currentCompanyId(), warehouse.code, warehouse.name, warehouse.status],
   )
   return { ...warehouse, id }
 }
@@ -1536,7 +1543,7 @@ export async function updateStockItem(id: string, item: Omit<StockItem, "id">) {
       item.defaultCogsAccountId ?? null,
       item.reorderLevel,
       id,
-      DEFAULT_COMPANY_ID,
+      currentCompanyId(),
     ],
   )
   return { ...item, id }
@@ -1547,7 +1554,7 @@ export async function updateWarehouse(id: string, warehouse: Omit<Warehouse, "id
   await ensureDemoCompany()
   await query(
     "UPDATE warehouses SET code = $1, name = $2, status = $3, updated_at = NOW() WHERE id = $4 AND company_id = $5",
-    [warehouse.code, warehouse.name, warehouse.status, id, DEFAULT_COMPANY_ID],
+    [warehouse.code, warehouse.name, warehouse.status, id, currentCompanyId()],
   )
   return { ...warehouse, id }
 }
@@ -1563,20 +1570,20 @@ export async function createOpeningStock(input: OpeningStockInput) {
 
   const item = await query<{ id: string; status: StockItem["status"] }>(
     "SELECT id, status FROM inventory_items WHERE id = $1 AND company_id = $2",
-    [input.itemId, DEFAULT_COMPANY_ID],
+    [input.itemId, currentCompanyId()],
   )
   if (!item.rows[0]) throw new Error("Stock item was not found.")
   if (item.rows[0].status !== "active") throw new Error("Opening stock can only be added for active items.")
 
   const warehouse = await query<{ id: string; status: Warehouse["status"] }>(
     "SELECT id, status FROM warehouses WHERE id = $1 AND company_id = $2",
-    [input.warehouseId, DEFAULT_COMPANY_ID],
+    [input.warehouseId, currentCompanyId()],
   )
   if (!warehouse.rows[0]) throw new Error("Warehouse was not found.")
   if (warehouse.rows[0].status !== "active") throw new Error("Opening stock can only be added to active warehouses.")
 
   await transaction(async (client) => {
-    const movementCount = await exec(client, "SELECT COUNT(*) AS count FROM stock_movements WHERE company_id = $1", [DEFAULT_COMPANY_ID])
+    const movementCount = await exec(client, "SELECT COUNT(*) AS count FROM stock_movements WHERE company_id = $1", [currentCompanyId()])
     const movementNo = `STK-OPEN-${String(Number(movementCount.rows[0]?.count ?? 0) + 1).padStart(4, "0")}`
     const movementId = `stm-${randomUUID()}`
     const totalCost = Math.round(input.quantity * input.unitCost * 100) / 100
@@ -1595,7 +1602,7 @@ export async function createOpeningStock(input: OpeningStockInput) {
         posted_at,
         created_by
       ) VALUES ($1, $2, $3, 'opening', $4, 'manual_opening', 'posted', $5, $6)`,
-      [movementId, DEFAULT_COMPANY_ID, movementNo, input.movementDate, postedAt, DEFAULT_USER_ID],
+      [movementId, currentCompanyId(), movementNo, input.movementDate, postedAt, currentUserId()],
     )
 
     await exec(
@@ -1617,7 +1624,7 @@ export async function createOpeningStock(input: OpeningStockInput) {
     const existing = await exec(
       client,
       "SELECT id, quantity_on_hand::text, inventory_value::text FROM stock_balances WHERE company_id = $1 AND item_id = $2 AND warehouse_id = $3",
-      [DEFAULT_COMPANY_ID, input.itemId, input.warehouseId],
+      [currentCompanyId(), input.itemId, input.warehouseId],
     )
     const existingBalance = existing.rows[0] as { id: string; quantity_on_hand: string; inventory_value: string } | undefined
     const nextQuantity = (existingBalance ? Number(existingBalance.quantity_on_hand) : 0) + input.quantity
@@ -1644,7 +1651,7 @@ export async function createOpeningStock(input: OpeningStockInput) {
           inventory_value,
           average_unit_cost
         ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-        [`stb-${randomUUID()}`, DEFAULT_COMPANY_ID, input.itemId, input.warehouseId, nextQuantity, nextValue, nextAverage],
+        [`stb-${randomUUID()}`, currentCompanyId(), input.itemId, input.warehouseId, nextQuantity, nextValue, nextAverage],
       )
     }
   })
@@ -1690,7 +1697,7 @@ export async function updateDraftJournalEntry(id: string, entry: Omit<JournalEnt
     await exec(
       client,
       "UPDATE journal_entries SET date = $1, description = $2, reference = $3, updated_at = NOW() WHERE id = $4 AND company_id = $5 AND status = 'draft'",
-      [updated.date, updated.description, updated.reference ?? null, id, DEFAULT_COMPANY_ID],
+      [updated.date, updated.description, updated.reference ?? null, id, currentCompanyId()],
     )
     await exec(client, "DELETE FROM journal_lines WHERE journal_entry_id = $1", [id])
     for (const [index, line] of updated.lines.entries()) {
@@ -1718,7 +1725,7 @@ export async function postDraftJournalEntry(id: string, confirmation: Confirmati
     await exec(client, "UPDATE journal_entries SET status = 'posted', posted_at = $1, updated_at = NOW() WHERE id = $2 AND company_id = $3", [
       postedAt,
       id,
-      DEFAULT_COMPANY_ID,
+      currentCompanyId(),
     ])
     await insertAuditLog(client, "journal_entry.draft.post", "journal_entry", id, confirmation, {
       reference: existing.reference ?? null,
@@ -1786,7 +1793,7 @@ export async function createAdjustmentJournalEntry(originalId: string, entry: Om
 export async function createInvoice(invoice: Omit<Invoice, "id" | "number">) {
   await ensureDatabaseReady()
   await ensureDemoCompany()
-  const invoiceCount = await query<{ count: string }>("SELECT COUNT(*) AS count FROM invoices WHERE company_id = $1", [DEFAULT_COMPANY_ID])
+  const invoiceCount = await query<{ count: string }>("SELECT COUNT(*) AS count FROM invoices WHERE company_id = $1", [currentCompanyId()])
   const number = `INV-2026-${String(Number(invoiceCount.rows[0]?.count ?? 0) + 1).padStart(3, "0")}`
   const created: Invoice = { ...invoice, id: `inv-${randomUUID()}`, number }
   await transaction(async (client) => {
@@ -1807,11 +1814,11 @@ export async function createVendorBill(bill: Omit<VendorBill, "id" | "billNumber
   await ensureDemoCompany()
   const vendor = await query<{ id: string }>("SELECT id FROM contacts WHERE id = $1 AND company_id = $2 AND type = 'vendor'", [
     bill.vendorId,
-    DEFAULT_COMPANY_ID,
+    currentCompanyId(),
   ])
   if (!vendor.rows[0]) throw new Error("AP vendor was not found.")
 
-  const billCount = await query<{ count: string }>("SELECT COUNT(*) AS count FROM vendor_bills WHERE company_id = $1", [DEFAULT_COMPANY_ID])
+  const billCount = await query<{ count: string }>("SELECT COUNT(*) AS count FROM vendor_bills WHERE company_id = $1", [currentCompanyId()])
   const billNumber = `BILL-2026-${String(Number(billCount.rows[0]?.count ?? 0) + 1).padStart(3, "0")}`
   const created: VendorBill = { ...bill, id: `vb-${randomUUID()}`, billNumber }
   await transaction(async (client) => {
@@ -1833,7 +1840,7 @@ export async function createReceipt(receipt: Omit<Receipt, "id" | "receiptNumber
   if (!receipt.receiptDate) throw new Error("Receipt date is required.")
   if (!Number.isFinite(receipt.amount) || receipt.amount <= 0) throw new Error("Receipt amount must be greater than zero.")
 
-  const receiptCount = await query<{ count: string }>("SELECT COUNT(*) AS count FROM receipts WHERE company_id = $1", [DEFAULT_COMPANY_ID])
+  const receiptCount = await query<{ count: string }>("SELECT COUNT(*) AS count FROM receipts WHERE company_id = $1", [currentCompanyId()])
   const created: Receipt = {
     ...receipt,
     id: `rcpt-${randomUUID()}`,
@@ -1863,11 +1870,11 @@ export async function createReceipt(receipt: Omit<Receipt, "id" | "receiptNumber
         const allocated = await exec(
           client,
           "SELECT COALESCE(SUM(amount), 0)::text AS amount FROM payment_allocations WHERE company_id = $1 AND target_type = 'invoice' AND target_id = $2",
-          [DEFAULT_COMPANY_ID, created.invoiceId],
+          [currentCompanyId(), created.invoiceId],
         )
         const allocatedAmount = Number((allocated.rows[0] as { amount: string } | undefined)?.amount ?? 0)
         const nextStatus = allocatedAmount >= invoice.items.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0) * (1 + invoice.taxRate / 100) ? "paid" : "sent"
-        await exec(client, "UPDATE invoices SET status = $1, updated_at = NOW() WHERE id = $2 AND company_id = $3", [nextStatus, created.invoiceId, DEFAULT_COMPANY_ID])
+        await exec(client, "UPDATE invoices SET status = $1, updated_at = NOW() WHERE id = $2 AND company_id = $3", [nextStatus, created.invoiceId, currentCompanyId()])
       }
     }
   })
@@ -1881,7 +1888,7 @@ export async function createPaymentVoucher(voucher: Omit<PaymentVoucher, "id" | 
   if (!voucher.paymentDate) throw new Error("Payment date is required.")
   if (!Number.isFinite(voucher.amount) || voucher.amount <= 0) throw new Error("Payment amount must be greater than zero.")
 
-  const voucherCount = await query<{ count: string }>("SELECT COUNT(*) AS count FROM payment_vouchers WHERE company_id = $1", [DEFAULT_COMPANY_ID])
+  const voucherCount = await query<{ count: string }>("SELECT COUNT(*) AS count FROM payment_vouchers WHERE company_id = $1", [currentCompanyId()])
   const created: PaymentVoucher = {
     ...voucher,
     id: `pv-${randomUUID()}`,
@@ -1909,18 +1916,18 @@ export async function createPaymentVoucher(voucher: Omit<PaymentVoucher, "id" | 
       const billResult = await exec(
         client,
         "SELECT total_amount::text FROM vendor_bills WHERE id = $1 AND company_id = $2",
-        [created.vendorBillId, DEFAULT_COMPANY_ID],
+        [created.vendorBillId, currentCompanyId()],
       )
       const bill = billResult.rows[0] as { total_amount: string } | undefined
       if (bill) {
         const allocated = await exec(
           client,
           "SELECT COALESCE(SUM(amount), 0)::text AS amount FROM payment_allocations WHERE company_id = $1 AND target_type = 'vendor_bill' AND target_id = $2",
-          [DEFAULT_COMPANY_ID, created.vendorBillId],
+          [currentCompanyId(), created.vendorBillId],
         )
         const allocatedAmount = Number((allocated.rows[0] as { amount: string } | undefined)?.amount ?? 0)
         const nextStatus = allocatedAmount >= Number(bill.total_amount) ? "paid" : "partially_paid"
-        await exec(client, "UPDATE vendor_bills SET status = $1, updated_at = NOW() WHERE id = $2 AND company_id = $3", [nextStatus, created.vendorBillId, DEFAULT_COMPANY_ID])
+        await exec(client, "UPDATE vendor_bills SET status = $1, updated_at = NOW() WHERE id = $2 AND company_id = $3", [nextStatus, created.vendorBillId, currentCompanyId()])
       }
     }
   })
@@ -1932,7 +1939,7 @@ async function allocatedAmount(db: DbExecutor, targetType: PaymentAllocation["ta
   const result = await exec(
     db,
     "SELECT COALESCE(SUM(amount), 0)::text AS amount FROM payment_allocations WHERE company_id = $1 AND target_type = $2 AND target_id = $3",
-    [DEFAULT_COMPANY_ID, targetType, targetId],
+    [currentCompanyId(), targetType, targetId],
   )
   return Number((result.rows[0] as { amount: string } | undefined)?.amount ?? 0)
 }
@@ -1942,7 +1949,7 @@ async function createReceiptForInvoice(db: DbExecutor, invoice: Invoice, amount:
   if (roundedAmount <= 0) return null
 
   await ensurePostingAccounts(db)
-  const receiptCount = await exec(db, "SELECT COUNT(*) AS count FROM receipts WHERE company_id = $1", [DEFAULT_COMPANY_ID])
+  const receiptCount = await exec(db, "SELECT COUNT(*) AS count FROM receipts WHERE company_id = $1", [currentCompanyId()])
   const receipt: Receipt = {
     id: `rcpt-${randomUUID()}`,
     invoiceId: invoice.id,
@@ -1972,7 +1979,7 @@ async function createPaymentVoucherForBill(db: DbExecutor, vendorBillId: string,
   if (roundedAmount <= 0) return null
 
   await ensurePostingAccounts(db)
-  const voucherCount = await exec(db, "SELECT COUNT(*) AS count FROM payment_vouchers WHERE company_id = $1", [DEFAULT_COMPANY_ID])
+  const voucherCount = await exec(db, "SELECT COUNT(*) AS count FROM payment_vouchers WHERE company_id = $1", [currentCompanyId()])
   const voucher: PaymentVoucher = {
     id: `pv-${randomUUID()}`,
     vendorBillId,
@@ -2041,7 +2048,7 @@ export async function createWorkflowDocument(document: Omit<WorkflowDocument, "i
   const totalAmount = Number(lines.reduce((sum, line) => sum + line.lineTotal, 0).toFixed(2))
   const count = await query<{ count: string }>(
     "SELECT COUNT(*) AS count FROM workflow_documents WHERE company_id = $1 AND document_type = $2",
-    [DEFAULT_COMPANY_ID, document.documentType],
+    [currentCompanyId(), document.documentType],
   )
   const prefix = WORKFLOW_PREFIX[document.documentType]
   const created: WorkflowDocument = {
@@ -2066,7 +2073,7 @@ export async function updateWorkflowDocument(id: string, document: Omit<Workflow
 
   const existing = await query<WorkflowDocumentRow>(
     "SELECT id, document_type, document_number, contact_id, status, document_date::text, total_amount::text, source_document_id FROM workflow_documents WHERE id = $1 AND company_id = $2",
-    [id, DEFAULT_COMPANY_ID],
+    [id, currentCompanyId()],
   )
   if (!existing.rows[0]) throw new Error("Workflow document was not found.")
 
@@ -2083,7 +2090,7 @@ export async function updateWorkflowDocument(id: string, document: Omit<Workflow
         totalAmount,
         document.sourceDocumentId ?? null,
         id,
-        DEFAULT_COMPANY_ID,
+        currentCompanyId(),
       ],
     )
     await replaceWorkflowDocumentLines(client, id, lines)
@@ -2104,13 +2111,13 @@ export async function updateWorkflowDocumentStatus(id: string, status: string, c
   validateConfirmation(confirmation, UPDATE_CONFIRMATION_PHRASE)
   const existing = await query<WorkflowDocumentRow>(
     "SELECT id, document_type, document_number, contact_id, status, document_date::text, total_amount::text, source_document_id FROM workflow_documents WHERE id = $1 AND company_id = $2",
-    [id, DEFAULT_COMPANY_ID],
+    [id, currentCompanyId()],
   )
   const document = existing.rows[0]
   if (!document) throw new Error("Workflow document was not found.")
 
   await transaction(async (client) => {
-    await exec(client, "UPDATE workflow_documents SET status = $1 WHERE id = $2 AND company_id = $3", [status.trim(), id, DEFAULT_COMPANY_ID])
+    await exec(client, "UPDATE workflow_documents SET status = $1 WHERE id = $2 AND company_id = $3", [status.trim(), id, currentCompanyId()])
     await insertAuditLog(client, "workflow_document.status.update", "workflow_document", id, confirmation, {
       fromStatus: document.status,
       toStatus: status,
@@ -2145,7 +2152,7 @@ export async function updateFixedAsset(id: string, asset: Omit<FixedAsset, "id">
   await ensureDatabaseReady()
   await ensureDemoCompany()
   validateFixedAsset(asset)
-  const existing = await query("SELECT id FROM fixed_assets WHERE id = $1 AND company_id = $2", [id, DEFAULT_COMPANY_ID])
+  const existing = await query("SELECT id FROM fixed_assets WHERE id = $1 AND company_id = $2", [id, currentCompanyId()])
   if (!existing.rows[0]) throw new Error("Fixed asset was not found.")
   const updated: FixedAsset = { ...asset, id }
   await transaction(async (client) => {
@@ -2159,11 +2166,11 @@ async function getFixedAssetsAndSchedules() {
     query<FixedAssetRow>(
       `SELECT id, asset_number, name, purchase_date::text, purchase_price::text, useful_life_months, salvage_value::text, status, asset_account_id, accumulated_depreciation_account_id, depreciation_expense_account_id, disposal_date::text, disposal_proceeds::text
        FROM fixed_assets WHERE company_id = $1 ORDER BY asset_number`,
-      [DEFAULT_COMPANY_ID],
+      [currentCompanyId()],
     ),
     query<DepreciationScheduleRow>(
       "SELECT id, asset_id, period_date::text, depreciation_amount::text, journal_entry_id, status FROM depreciation_schedules WHERE company_id = $1 ORDER BY period_date DESC",
-      [DEFAULT_COMPANY_ID],
+      [currentCompanyId()],
     ),
   ])
   return { assets: assets.rows.map(mapFixedAsset), schedules: schedules.rows.map(mapDepreciationSchedule) }
@@ -2194,7 +2201,7 @@ export async function postDepreciationSchedule(id: string, confirmation: Confirm
   validateConfirmation(confirmation, UPDATE_CONFIRMATION_PHRASE)
   const scheduleResult = await query<DepreciationScheduleRow>(
     "SELECT id, asset_id, period_date::text, depreciation_amount::text, journal_entry_id, status FROM depreciation_schedules WHERE id = $1 AND company_id = $2",
-    [id, DEFAULT_COMPANY_ID],
+    [id, currentCompanyId()],
   )
   const schedule = scheduleResult.rows[0] ? mapDepreciationSchedule(scheduleResult.rows[0]) : null
   if (!schedule) throw new Error("Depreciation schedule was not found.")
@@ -2202,7 +2209,7 @@ export async function postDepreciationSchedule(id: string, confirmation: Confirm
   const assetResult = await query<FixedAssetRow>(
     `SELECT id, asset_number, name, purchase_date::text, purchase_price::text, useful_life_months, salvage_value::text, status, asset_account_id, accumulated_depreciation_account_id, depreciation_expense_account_id, disposal_date::text, disposal_proceeds::text
      FROM fixed_assets WHERE id = $1 AND company_id = $2`,
-    [schedule.assetId, DEFAULT_COMPANY_ID],
+    [schedule.assetId, currentCompanyId()],
   )
   const asset = assetResult.rows[0] ? mapFixedAsset(assetResult.rows[0]) : null
   if (!asset) throw new Error("Fixed asset was not found.")
@@ -2222,7 +2229,7 @@ export async function postDepreciationSchedule(id: string, confirmation: Confirm
   await transaction(async (client) => {
     await assertPeriodAllowsPosting(client, schedule.periodDate, confirmation, "depreciation.post", journalEntry.id)
     await insertJournalEntry(client, journalEntry)
-    await exec(client, "UPDATE depreciation_schedules SET status = 'posted', journal_entry_id = $1 WHERE id = $2 AND company_id = $3", [journalEntry.id, id, DEFAULT_COMPANY_ID])
+    await exec(client, "UPDATE depreciation_schedules SET status = 'posted', journal_entry_id = $1 WHERE id = $2 AND company_id = $3", [journalEntry.id, id, currentCompanyId()])
     await insertAuditLog(client, "depreciation.post", "depreciation_schedule", id, confirmation, {
       assetId: asset.id,
       assetNumber: asset.assetNumber,
@@ -2260,7 +2267,7 @@ export async function postPeriodClose(periodStart: string, periodEnd: string, re
       client,
       `INSERT INTO retained_earnings_closing_runs (id, company_id, status, revenue_total, expense_total, net_income, journal_entry_id, period_start, period_end, closed_at, created_by)
        VALUES ($1, $2, 'posted', $3, $4, $5, $6, $7, $8, NOW(), $9)`,
-      [`close-${randomUUID()}`, DEFAULT_COMPANY_ID, preview.revenueTotal, preview.expenseTotal, preview.netIncome, journalEntry.id, periodStart, periodEnd, DEFAULT_USER_ID],
+      [`close-${randomUUID()}`, currentCompanyId(), preview.revenueTotal, preview.expenseTotal, preview.netIncome, journalEntry.id, periodStart, periodEnd, currentUserId()],
     )
     await insertAuditLog(client, "period_close.post", "retained_earnings_closing_run", journalEntry.id, confirmation, {
       periodStart,
@@ -2290,7 +2297,7 @@ export async function updateInvoiceStatus(id: string, status: Invoice["status"],
       const remaining = roundMoney(amounts.total - alreadyAllocated)
       await createReceiptForInvoice(client, existing, remaining, new Date().toISOString().slice(0, 10))
     }
-    await exec(client, "UPDATE invoices SET status = $1, updated_at = NOW() WHERE id = $2 AND company_id = $3", [status, id, DEFAULT_COMPANY_ID])
+    await exec(client, "UPDATE invoices SET status = $1, updated_at = NOW() WHERE id = $2 AND company_id = $3", [status, id, currentCompanyId()])
     await insertAuditLog(client, "invoice.status.update", "invoice", id, confirmation, {
       fromStatus: existing.status,
       toStatus: status,
@@ -2304,7 +2311,7 @@ export async function updateVendorBillStatus(id: string, status: VendorBill["sta
   validateConfirmation(confirmation, UPDATE_CONFIRMATION_PHRASE)
   const existing = await query<VendorBillRow>(
     "SELECT id, vendor_id, bill_number, bill_date::text, due_date::text, status, subtotal::text, tax_amount::text, total_amount::text FROM vendor_bills WHERE id = $1 AND company_id = $2",
-    [id, DEFAULT_COMPANY_ID],
+    [id, currentCompanyId()],
   )
   const bill = existing.rows[0]
   if (!bill) throw new Error("Vendor bill was not found.")
@@ -2320,7 +2327,7 @@ export async function updateVendorBillStatus(id: string, status: VendorBill["sta
       const remaining = roundMoney(mappedBill.totalAmount - alreadyAllocated)
       await createPaymentVoucherForBill(client, id, remaining, new Date().toISOString().slice(0, 10))
     }
-    await exec(client, "UPDATE vendor_bills SET status = $1, updated_at = NOW() WHERE id = $2 AND company_id = $3", [status, id, DEFAULT_COMPANY_ID])
+    await exec(client, "UPDATE vendor_bills SET status = $1, updated_at = NOW() WHERE id = $2 AND company_id = $3", [status, id, currentCompanyId()])
     await insertAuditLog(client, "vendor_bill.status.update", "vendor_bill", id, confirmation, {
       fromStatus: bill.status,
       toStatus: status,
