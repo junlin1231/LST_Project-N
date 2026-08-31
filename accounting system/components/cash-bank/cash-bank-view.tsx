@@ -1,7 +1,7 @@
 "use client"
 
 import { useMemo, useState } from "react"
-import { ArrowDownToLine, FileText, Landmark, Search, WalletCards } from "lucide-react"
+import { ArrowDownToLine, ArrowUpFromLine, FileText, Landmark, Search, WalletCards, type LucideIcon } from "lucide-react"
 import { Amount } from "@/components/amount"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent } from "@/components/ui/card"
@@ -33,7 +33,7 @@ function documentTypeLabel(type: WorkflowDocumentType) {
 }
 
 function EmptyState({ label }: { label: string }) {
-  return <p className="py-12 text-center text-sm text-muted-foreground">{label}</p>
+  return <p className="py-8 text-center text-sm text-muted-foreground">{label}</p>
 }
 
 function isCashAccountName(name: string) {
@@ -44,31 +44,121 @@ function isBankAccountName(name: string) {
   return /\b(bank|checking|cheque|savings)\b/i.test(name)
 }
 
-function AccountTable({ rows, emptyLabel }: { rows: CashBankAccountRow[]; emptyLabel: string }) {
+function MetricCard({
+  label,
+  value,
+  icon: Icon,
+  tone = "default",
+  secondary,
+}: {
+  label: string
+  value: number
+  icon: LucideIcon
+  tone?: "default" | "receive" | "pay"
+  secondary?: number
+}) {
+  const toneClass = tone === "receive" ? "bg-emerald-500/10 text-emerald-700" : tone === "pay" ? "bg-rose-500/10 text-rose-700" : "bg-muted text-muted-foreground"
+
   return (
-    <Card>
+    <Card className="rounded-md py-0">
+      <CardContent className="flex min-h-24 items-center justify-between gap-4 p-4">
+        <div className="min-w-0">
+          <p className="truncate text-xs font-medium text-muted-foreground">{label}</p>
+          <div className="mt-2 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+            <Amount value={value} className="text-xl font-semibold" />
+            {typeof secondary === "number" ? <Amount value={secondary} className="text-sm font-medium text-muted-foreground" /> : null}
+          </div>
+        </div>
+        <div className={`flex size-10 shrink-0 items-center justify-center rounded-md ${toneClass}`}>
+          <Icon className="size-5" />
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+function FlowMetricCard({ receivedTotal, paidTotal }: { receivedTotal: number; paidTotal: number }) {
+  return (
+    <Card className="rounded-md py-0">
+      <CardContent className="min-h-24 p-4">
+        <p className="text-xs font-medium text-muted-foreground">Receive / Pay</p>
+        <div className="mt-3 grid grid-cols-2 gap-3">
+          <div className="min-w-0">
+            <div className="mb-1 flex items-center gap-1.5 text-xs text-emerald-700">
+              <ArrowDownToLine className="size-3.5" />
+              <span>Receive</span>
+            </div>
+            <Amount value={receivedTotal} className="text-base font-semibold" />
+          </div>
+          <div className="min-w-0">
+            <div className="mb-1 flex items-center gap-1.5 text-xs text-rose-700">
+              <ArrowUpFromLine className="size-3.5" />
+              <span>Pay</span>
+            </div>
+            <Amount value={paidTotal} className="text-base font-semibold" />
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+function PanelHeader({
+  title,
+  description,
+  count,
+}: {
+  title: string
+  description: string
+  count?: number
+}) {
+  return (
+    <div className="flex flex-col gap-1 border-b border-border px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+      <div>
+        <h2 className="text-sm font-semibold">{title}</h2>
+        <p className="text-xs text-muted-foreground">{description}</p>
+      </div>
+      {typeof count === "number" ? <Badge variant="outline">{count.toLocaleString()} rows</Badge> : null}
+    </div>
+  )
+}
+
+function AccountTable({
+  rows,
+  emptyLabel,
+  title,
+  description,
+}: {
+  rows: CashBankAccountRow[]
+  emptyLabel: string
+  title: string
+  description: string
+}) {
+  return (
+    <Card className="rounded-md py-0">
+      <PanelHeader title={title} description={description} count={rows.length} />
       <CardContent className="p-0">
         {rows.length === 0 ? (
           <EmptyState label={emptyLabel} />
         ) : (
-          <Table>
+          <Table className="text-sm">
             <TableHeader>
               <TableRow>
-                <TableHead>Code</TableHead>
-                <TableHead>Account</TableHead>
-                <TableHead>Last Activity</TableHead>
-                <TableHead className="text-right">Transactions</TableHead>
-                <TableHead className="text-right">Balance</TableHead>
+                <TableHead className="h-10">Code</TableHead>
+                <TableHead className="h-10">Account</TableHead>
+                <TableHead className="h-10">Last Activity</TableHead>
+                <TableHead className="h-10 text-right">Txn</TableHead>
+                <TableHead className="h-10 text-right">Balance</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {rows.map((row) => (
                 <TableRow key={row.account.id}>
-                  <TableCell className="font-mono text-sm">{row.account.code}</TableCell>
-                  <TableCell className="font-medium">{row.account.name}</TableCell>
-                  <TableCell>{row.lastActivity ? formatDate(row.lastActivity) : "-"}</TableCell>
-                  <TableCell className="text-right">{row.transactionCount}</TableCell>
-                  <TableCell className="text-right"><Amount value={row.balance} /></TableCell>
+                  <TableCell className="py-2 font-mono text-xs">{row.account.code}</TableCell>
+                  <TableCell className="py-2 font-medium">{row.account.name}</TableCell>
+                  <TableCell className="py-2 text-muted-foreground">{row.lastActivity ? formatDate(row.lastActivity) : "-"}</TableCell>
+                  <TableCell className="py-2 text-right">{row.transactionCount}</TableCell>
+                  <TableCell className="py-2 text-right"><Amount value={row.balance} /></TableCell>
                 </TableRow>
               ))}
             </TableBody>
@@ -82,28 +172,33 @@ function AccountTable({ rows, emptyLabel }: { rows: CashBankAccountRow[]; emptyL
 function TransactionTable({
   transactions,
   emptyLabel,
+  title,
+  description,
   onOpen,
 }: {
   transactions: CashBankTransaction[]
   emptyLabel: string
+  title: string
+  description: string
   onOpen: (transaction: CashBankTransaction) => void
 }) {
   return (
-    <Card>
+    <Card className="rounded-md py-0">
+      <PanelHeader title={title} description={description} count={transactions.length} />
       <CardContent className="p-0">
         {transactions.length === 0 ? (
           <EmptyState label={emptyLabel} />
         ) : (
-          <Table>
+          <Table className="text-sm">
             <TableHeader>
               <TableRow>
-                <TableHead>Date</TableHead>
-                <TableHead>Reference</TableHead>
-                <TableHead>Account</TableHead>
-                <TableHead>Counterparty</TableHead>
-                <TableHead>Description</TableHead>
-                <TableHead className="text-right">Inflow</TableHead>
-                <TableHead className="text-right">Outflow</TableHead>
+                <TableHead className="h-10">Date</TableHead>
+                <TableHead className="h-10">Reference</TableHead>
+                <TableHead className="h-10">Account</TableHead>
+                <TableHead className="h-10">Counterparty</TableHead>
+                <TableHead className="h-10">Description</TableHead>
+                <TableHead className="h-10 text-right">Inflow</TableHead>
+                <TableHead className="h-10 text-right">Outflow</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -121,13 +216,13 @@ function TransactionTable({
                     }
                   }}
                 >
-                  <TableCell>{formatDate(transaction.date)}</TableCell>
-                  <TableCell className="font-mono text-sm">{transaction.reference ?? "-"}</TableCell>
-                  <TableCell>{transaction.account.name}</TableCell>
-                  <TableCell>{transaction.counterparty}</TableCell>
-                  <TableCell className="max-w-sm truncate">{transaction.description}</TableCell>
-                  <TableCell className="text-right"><Amount value={transaction.inflow} muted={transaction.inflow === 0} /></TableCell>
-                  <TableCell className="text-right"><Amount value={transaction.outflow} muted={transaction.outflow === 0} /></TableCell>
+                  <TableCell className="py-2.5 text-muted-foreground">{formatDate(transaction.date)}</TableCell>
+                  <TableCell className="py-2.5 font-mono text-xs">{transaction.reference ?? "-"}</TableCell>
+                  <TableCell className="py-2.5">{transaction.account.name}</TableCell>
+                  <TableCell className="max-w-52 truncate py-2.5">{transaction.counterparty}</TableCell>
+                  <TableCell className="max-w-sm truncate py-2.5 text-muted-foreground">{transaction.description}</TableCell>
+                  <TableCell className="py-2.5 text-right"><Amount value={transaction.inflow} muted={transaction.inflow === 0} /></TableCell>
+                  <TableCell className="py-2.5 text-right"><Amount value={transaction.outflow} muted={transaction.outflow === 0} /></TableCell>
                 </TableRow>
               ))}
             </TableBody>
@@ -282,104 +377,115 @@ export function CashBankView() {
   const openTransaction = (transaction: CashBankTransaction) => setSelectedTransaction(transaction)
 
   return (
-    <div className="space-y-6">
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <Card>
-          <CardContent className="flex items-center justify-between p-4">
-            <div>
-              <p className="text-xs text-muted-foreground">Cash & Bank Balance</p>
-              <Amount value={summary.totalBalance} className="mt-1 text-xl font-semibold" />
-            </div>
-            <WalletCards className="size-5 text-muted-foreground" />
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="flex items-center justify-between p-4">
-            <div>
-              <p className="text-xs text-muted-foreground">Cash Balance</p>
-              <Amount value={cashBalance} className="mt-1 text-xl font-semibold" />
-            </div>
-            <WalletCards className="size-5 text-muted-foreground" />
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="flex items-center justify-between p-4">
-            <div>
-              <p className="text-xs text-muted-foreground">Bank Balance</p>
-              <Amount value={bankBalance} className="mt-1 text-xl font-semibold" />
-            </div>
-            <Landmark className="size-5 text-muted-foreground" />
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="flex items-center justify-between p-4">
-            <div>
-              <p className="text-xs text-muted-foreground">Receive / Pay</p>
-              <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-sm">
-                <Amount value={receivedTotal} className="font-semibold" />
-                <Amount value={paidTotal} className="font-semibold" />
-              </div>
-            </div>
-            <ArrowDownToLine className="size-5 text-muted-foreground" />
-          </CardContent>
-        </Card>
+    <div className="space-y-5">
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <MetricCard label="Cash & Bank Balance" value={summary.totalBalance} icon={WalletCards} />
+        <MetricCard label="Cash Balance" value={cashBalance} icon={WalletCards} />
+        <MetricCard label="Bank Balance" value={bankBalance} icon={Landmark} />
+        <FlowMetricCard receivedTotal={receivedTotal} paidTotal={paidTotal} />
       </div>
 
-      <div className="flex items-center gap-2">
-        <Search className="size-4 text-muted-foreground" />
-        <Input
-          className="sm:max-w-sm"
-          placeholder="Search reference, account, counterparty"
-          value={search}
-          onChange={(event) => setSearch(event.target.value)}
-        />
+      <div className="flex flex-col gap-3 rounded-md border border-border bg-card p-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="relative sm:w-80">
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            className="h-9 pl-8 text-sm"
+            placeholder="Search reference, account, counterparty"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+          />
+        </div>
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <Badge variant="outline">{filteredTransactions.length} transactions</Badge>
+          <span className="h-3 w-px bg-border" />
+          <Badge variant="outline">{filteredTransfers.length} transfers</Badge>
+        </div>
       </div>
 
       <Tabs defaultValue="cash" className="gap-4">
-        <TabsList>
-          <TabsTrigger value="cash">Cash</TabsTrigger>
-          <TabsTrigger value="bank">Bank</TabsTrigger>
-          <TabsTrigger value="receive">Receive</TabsTrigger>
-          <TabsTrigger value="pay">Pay</TabsTrigger>
-          <TabsTrigger value="transfers">Transfers</TabsTrigger>
+        <TabsList className="h-auto w-full justify-start overflow-x-auto rounded-md p-1">
+          <TabsTrigger className="h-9 flex-none px-4" value="cash">Cash</TabsTrigger>
+          <TabsTrigger className="h-9 flex-none px-4" value="bank">Bank</TabsTrigger>
+          <TabsTrigger className="h-9 flex-none px-4" value="receive">Receive</TabsTrigger>
+          <TabsTrigger className="h-9 flex-none px-4" value="pay">Pay</TabsTrigger>
+          <TabsTrigger className="h-9 flex-none px-4" value="transfers">Transfers</TabsTrigger>
         </TabsList>
 
         <TabsContent value="cash">
-          <div className="grid gap-4 lg:grid-cols-[22rem_1fr]">
-            <AccountTable rows={cashRows} emptyLabel="No cash accounts found in the chart of accounts." />
-            <TransactionTable transactions={cashTransactions} emptyLabel="No cash transactions match this view." onOpen={openTransaction} />
+          <div className="grid gap-4 xl:grid-cols-[24rem_1fr]">
+            <AccountTable
+              rows={cashRows}
+              title="Cash Accounts"
+              description="Physical cash and petty cash balances from posted ledger lines."
+              emptyLabel="No cash accounts found in the chart of accounts."
+            />
+            <TransactionTable
+              transactions={cashTransactions}
+              title="Cash Register"
+              description="Cash receipts, payments, and transfers touching cash accounts."
+              emptyLabel="No cash transactions match this view."
+              onOpen={openTransaction}
+            />
           </div>
         </TabsContent>
 
         <TabsContent value="bank">
-          <div className="grid gap-4 lg:grid-cols-[22rem_1fr]">
-            <AccountTable rows={bankRows} emptyLabel="No bank accounts found in the chart of accounts." />
-            <TransactionTable transactions={bankTransactions} emptyLabel="No bank transactions match this view." onOpen={openTransaction} />
+          <div className="grid gap-4 xl:grid-cols-[24rem_1fr]">
+            <AccountTable
+              rows={bankRows}
+              title="Bank Accounts"
+              description="Bank, checking, and savings balances from posted ledger lines."
+              emptyLabel="No bank accounts found in the chart of accounts."
+            />
+            <TransactionTable
+              transactions={bankTransactions}
+              title="Bank Register"
+              description="Bank receipts, payments, and transfers touching bank accounts."
+              emptyLabel="No bank transactions match this view."
+              onOpen={openTransaction}
+            />
           </div>
         </TabsContent>
 
         <TabsContent value="receive">
-          <TransactionTable transactions={receiveTransactions} emptyLabel="No received money matches this view." onOpen={openTransaction} />
+          <TransactionTable
+            transactions={receiveTransactions}
+            title="Money Received"
+            description="External inflows only. Internal cash and bank transfers are excluded."
+            emptyLabel="No received money matches this view."
+            onOpen={openTransaction}
+          />
         </TabsContent>
 
         <TabsContent value="pay">
-          <TransactionTable transactions={payTransactions} emptyLabel="No paid money matches this view." onOpen={openTransaction} />
+          <TransactionTable
+            transactions={payTransactions}
+            title="Money Paid"
+            description="External outflows only. Internal cash and bank transfers are excluded."
+            emptyLabel="No paid money matches this view."
+            onOpen={openTransaction}
+          />
         </TabsContent>
 
         <TabsContent value="transfers">
-          <Card>
+          <Card className="rounded-md py-0">
+            <PanelHeader
+              title="Internal Transfers"
+              description="Cash-to-bank and bank-to-bank movements detected from both sides of the ledger."
+              count={filteredTransfers.length}
+            />
             <CardContent className="p-0">
               {filteredTransfers.length === 0 ? (
                 <EmptyState label="No cash-to-bank or bank-to-bank transfers detected yet." />
               ) : (
-                <Table>
+                <Table className="text-sm">
                   <TableHeader>
                     <TableRow>
-                      <TableHead>Date</TableHead>
-                      <TableHead>Reference</TableHead>
-                      <TableHead>From / To</TableHead>
-                      <TableHead>Status</TableHead>
-                      <TableHead className="text-right">Amount</TableHead>
+                      <TableHead className="h-10">Date</TableHead>
+                      <TableHead className="h-10">Reference</TableHead>
+                      <TableHead className="h-10">From / To</TableHead>
+                      <TableHead className="h-10">Status</TableHead>
+                      <TableHead className="h-10 text-right">Amount</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -397,15 +503,15 @@ export function CashBankView() {
                           }
                         }}
                       >
-                        <TableCell>{formatDate(transfer.date)}</TableCell>
-                        <TableCell className="font-mono text-sm">{transfer.reference ?? "-"}</TableCell>
-                        <TableCell>
+                        <TableCell className="py-2.5 text-muted-foreground">{formatDate(transfer.date)}</TableCell>
+                        <TableCell className="py-2.5 font-mono text-xs">{transfer.reference ?? "-"}</TableCell>
+                        <TableCell className="py-2.5">
                           <span className="font-medium">{transfer.netAmount < 0 ? transfer.account.name : transfer.counterparty}</span>
                           <span className="text-muted-foreground"> to </span>
                           <span className="font-medium">{transfer.netAmount < 0 ? transfer.counterparty : transfer.account.name}</span>
                         </TableCell>
-                        <TableCell><Badge variant="secondary">Ledger Posted</Badge></TableCell>
-                        <TableCell className="text-right"><Amount value={Math.max(transfer.inflow, transfer.outflow)} /></TableCell>
+                        <TableCell className="py-2.5"><Badge variant="secondary">Posted</Badge></TableCell>
+                        <TableCell className="py-2.5 text-right"><Amount value={Math.max(transfer.inflow, transfer.outflow)} /></TableCell>
                       </TableRow>
                     ))}
                   </TableBody>
@@ -424,20 +530,20 @@ export function CashBankView() {
               <DialogDescription>Cash and bank movement detail with ledger lines and matched accounting documents.</DialogDescription>
             </DialogHeader>
 
-            <div className="grid gap-3 sm:grid-cols-4">
-              <div className="rounded-lg border border-border p-3">
+            <div className="grid gap-2 sm:grid-cols-4">
+              <div className="rounded-md border border-border p-2.5">
                 <p className="text-xs text-muted-foreground">Date</p>
                 <p className="mt-1 font-medium">{formatDate(selectedTransaction.date)}</p>
               </div>
-              <div className="rounded-lg border border-border p-3">
+              <div className="rounded-md border border-border p-2.5">
                 <p className="text-xs text-muted-foreground">Account</p>
                 <p className="mt-1 font-medium">{selectedTransaction.account.name}</p>
               </div>
-              <div className="rounded-lg border border-border p-3">
+              <div className="rounded-md border border-border p-2.5">
                 <p className="text-xs text-muted-foreground">Inflow</p>
                 <Amount value={selectedTransaction.inflow} muted={selectedTransaction.inflow === 0} className="mt-1 font-semibold" />
               </div>
-              <div className="rounded-lg border border-border p-3">
+              <div className="rounded-md border border-border p-2.5">
                 <p className="text-xs text-muted-foreground">Outflow</p>
                 <Amount value={selectedTransaction.outflow} muted={selectedTransaction.outflow === 0} className="mt-1 font-semibold" />
               </div>
@@ -445,15 +551,15 @@ export function CashBankView() {
 
             <section className="space-y-2">
               <h3 className="text-sm font-semibold">Journal Entry</h3>
-              <Card>
+              <Card size="sm" className="rounded-md py-0">
                 <CardContent className="p-0">
-                  <Table>
+                  <Table className="text-xs">
                     <TableHeader>
                       <TableRow>
-                        <TableHead>Account</TableHead>
-                        <TableHead>Description</TableHead>
-                        <TableHead className="text-right">Debit</TableHead>
-                        <TableHead className="text-right">Credit</TableHead>
+                        <TableHead className="h-8">Account</TableHead>
+                        <TableHead className="h-8">Description</TableHead>
+                        <TableHead className="h-8 text-right">Debit</TableHead>
+                        <TableHead className="h-8 text-right">Credit</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -461,13 +567,13 @@ export function CashBankView() {
                         const account = accountById.get(line.accountId)
                         return (
                           <TableRow key={`${line.accountId}-${index}`}>
-                            <TableCell>
+                            <TableCell className="py-1.5">
                               <span className="font-mono text-xs text-muted-foreground">{account?.code ?? line.accountId}</span>
                               <span className="ml-2 font-medium">{account?.name ?? line.accountId}</span>
                             </TableCell>
-                            <TableCell>{selectedEntry?.description ?? selectedTransaction.description}</TableCell>
-                            <TableCell className="text-right"><Amount value={line.debit} muted={line.debit === 0} /></TableCell>
-                            <TableCell className="text-right"><Amount value={line.credit} muted={line.credit === 0} /></TableCell>
+                            <TableCell className="py-1.5">{selectedEntry?.description ?? selectedTransaction.description}</TableCell>
+                            <TableCell className="py-1.5 text-right"><Amount value={line.debit} muted={line.debit === 0} /></TableCell>
+                            <TableCell className="py-1.5 text-right"><Amount value={line.credit} muted={line.credit === 0} /></TableCell>
                           </TableRow>
                         )
                       })}
@@ -475,7 +581,7 @@ export function CashBankView() {
                   </Table>
                 </CardContent>
               </Card>
-              <dl className="grid gap-2 text-sm sm:grid-cols-[8rem_1fr]">
+              <dl className="grid gap-1.5 text-xs sm:grid-cols-[7rem_1fr]">
                 <dt className="text-muted-foreground">Journal ID</dt>
                 <dd className="font-mono">{selectedTransaction.journalEntryId}</dd>
                 <dt className="text-muted-foreground">Counterparty</dt>
@@ -487,34 +593,34 @@ export function CashBankView() {
 
             <section className="space-y-2">
               <h3 className="text-sm font-semibold">Related Documents</h3>
-              <Card>
+              <Card size="sm" className="rounded-md py-0">
                 <CardContent className="p-0">
                   {relatedDocuments.length === 0 ? (
-                    <div className="flex items-center gap-2 p-4 text-sm text-muted-foreground">
+                    <div className="flex items-center gap-2 p-3 text-sm text-muted-foreground">
                       <FileText className="size-4" />
                       No invoice, bill, receipt, payment voucher, or workflow document matched this reference.
                     </div>
                   ) : (
-                    <Table>
+                    <Table className="text-xs">
                       <TableHeader>
                         <TableRow>
-                          <TableHead>Type</TableHead>
-                          <TableHead>No.</TableHead>
-                          <TableHead>Party</TableHead>
-                          <TableHead>Date</TableHead>
-                          <TableHead>Status</TableHead>
-                          <TableHead className="text-right">Amount</TableHead>
+                          <TableHead className="h-8">Type</TableHead>
+                          <TableHead className="h-8">No.</TableHead>
+                          <TableHead className="h-8">Party</TableHead>
+                          <TableHead className="h-8">Date</TableHead>
+                          <TableHead className="h-8">Status</TableHead>
+                          <TableHead className="h-8 text-right">Amount</TableHead>
                         </TableRow>
                       </TableHeader>
                       <TableBody>
                         {relatedDocuments.map((document) => (
                           <TableRow key={`${document.type}-${document.id}`}>
-                            <TableCell>{document.type}</TableCell>
-                            <TableCell className="font-mono text-sm">{document.number}</TableCell>
-                            <TableCell className="font-medium">{document.party ?? "-"}</TableCell>
-                            <TableCell>{formatDate(document.date)}</TableCell>
-                            <TableCell><Badge variant={document.status === "posted" || document.status === "paid" ? "secondary" : "outline"}>{titleCase(document.status)}</Badge></TableCell>
-                            <TableCell className="text-right"><Amount value={document.amount} /></TableCell>
+                            <TableCell className="py-1.5">{document.type}</TableCell>
+                            <TableCell className="py-1.5 font-mono">{document.number}</TableCell>
+                            <TableCell className="py-1.5 font-medium">{document.party ?? "-"}</TableCell>
+                            <TableCell className="py-1.5">{formatDate(document.date)}</TableCell>
+                            <TableCell className="py-1.5"><Badge variant={document.status === "posted" || document.status === "paid" ? "secondary" : "outline"}>{titleCase(document.status)}</Badge></TableCell>
+                            <TableCell className="py-1.5 text-right"><Amount value={document.amount} /></TableCell>
                           </TableRow>
                         ))}
                       </TableBody>

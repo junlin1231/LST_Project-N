@@ -1,14 +1,21 @@
 "use client"
 
 import Link from "next/link"
-import { useState } from "react"
-import { ArrowRight, BookOpenText, CreditCard, Database, Package, RotateCcw, Users } from "lucide-react"
+import { useEffect, useState } from "react"
+import { ArrowRight, BookOpenText, BrainCircuit, CreditCard, Database, LoaderCircle, Package, RotateCcw, Save, Users } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { AuditView } from "@/components/audit/audit-view"
 import { useAccounting } from "@/lib/accounting/store"
 
 type ActionState = "idle" | "loading" | "resetting"
+type Notice = { type: "error" | "success"; message: string } | null
+type OcrOwnNamesSettings = {
+  companyName: string
+  legalName: string
+  taxId: string
+  ownNames: string[]
+}
 
 const masterDataLinks = [
   {
@@ -45,6 +52,30 @@ export function SettingsView() {
   const { loadDemoData, resetSystemData } = useAccounting()
   const [state, setState] = useState<ActionState>("idle")
   const [message, setMessage] = useState("")
+  const [ocrSettings, setOcrSettings] = useState<OcrOwnNamesSettings | null>(null)
+  const [ocrOwnNamesText, setOcrOwnNamesText] = useState("")
+  const [ocrLoading, setOcrLoading] = useState(true)
+  const [ocrSaving, setOcrSaving] = useState(false)
+  const [ocrNotice, setOcrNotice] = useState<Notice>(null)
+
+  async function readJson<T>(response: Response): Promise<T> {
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}))
+      throw new Error(body.error ?? `Request failed: ${response.status}`)
+    }
+    return response.json()
+  }
+
+  useEffect(() => {
+    fetch("/api/settings/ocr", { cache: "no-store" })
+      .then((response) => readJson<OcrOwnNamesSettings>(response))
+      .then((settings) => {
+        setOcrSettings(settings)
+        setOcrOwnNamesText(settings.ownNames.join("\n"))
+      })
+      .catch((error) => setOcrNotice({ type: "error", message: error instanceof Error ? error.message : "OCR settings failed to load." }))
+      .finally(() => setOcrLoading(false))
+  }, [])
 
   async function run(action: "load" | "reset") {
     setMessage("")
@@ -61,6 +92,26 @@ export function SettingsView() {
       setMessage(error instanceof Error ? error.message : "Settings action failed.")
     } finally {
       setState("idle")
+    }
+  }
+
+  async function saveOcrOwnNames() {
+    setOcrSaving(true)
+    setOcrNotice(null)
+    try {
+      const ownNames = ocrOwnNamesText.split(/\r?\n/).map((value) => value.trim()).filter(Boolean)
+      const settings = await readJson<OcrOwnNamesSettings>(await fetch("/api/settings/ocr", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ownNames }),
+      }))
+      setOcrSettings(settings)
+      setOcrOwnNamesText(settings.ownNames.join("\n"))
+      setOcrNotice({ type: "success", message: "OCR own entity names saved." })
+    } catch (error) {
+      setOcrNotice({ type: "error", message: error instanceof Error ? error.message : "OCR settings failed to save." })
+    } finally {
+      setOcrSaving(false)
     }
   }
 
@@ -104,6 +155,50 @@ export function SettingsView() {
           })}
         </div>
       </section>
+
+      <Card className="p-4">
+        <div className="grid gap-4 lg:grid-cols-[1fr_auto] lg:items-start">
+          <div className="flex items-start gap-3">
+            <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
+              <BrainCircuit className="size-4" />
+            </div>
+            <div className="min-w-0 space-y-3">
+              <div>
+                <h2 className="text-sm font-semibold">OCR Own Entity Names</h2>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  Names OCR uses to identify your company in bank slips and decide if transfers are money in or money out.
+                </p>
+              </div>
+              <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+                <div className="rounded-md border border-border p-3">
+                  <p className="text-xs text-muted-foreground">Company</p>
+                  <p className="mt-1 truncate text-sm font-medium">{ocrSettings?.companyName ?? (ocrLoading ? "Loading..." : "-")}</p>
+                </div>
+                <div className="rounded-md border border-border p-3">
+                  <p className="text-xs text-muted-foreground">Tax ID</p>
+                  <p className="mt-1 truncate text-sm font-medium">{ocrSettings?.taxId || "-"}</p>
+                </div>
+              </div>
+              <textarea
+                className="min-h-28 w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50"
+                value={ocrOwnNamesText}
+                onChange={(event) => setOcrOwnNamesText(event.target.value)}
+                placeholder="One name per line"
+                disabled={ocrLoading || ocrSaving}
+              />
+              {ocrNotice ? (
+                <p className={ocrNotice.type === "error" ? "text-sm text-destructive" : "text-sm text-muted-foreground"}>
+                  {ocrNotice.message}
+                </p>
+              ) : null}
+            </div>
+          </div>
+          <Button onClick={() => void saveOcrOwnNames()} disabled={ocrLoading || ocrSaving}>
+            {ocrSaving ? <LoaderCircle className="size-4 animate-spin" /> : <Save className="size-4" />}
+            {ocrSaving ? "Saving..." : "Save OCR Names"}
+          </Button>
+        </div>
+      </Card>
 
       <Card className="p-4">
         <div className="grid gap-4 lg:grid-cols-[1fr_auto] lg:items-center">

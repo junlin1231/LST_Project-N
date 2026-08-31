@@ -21,6 +21,14 @@ from .models import AccessAuditLog, AccessRequest, Invitation, User
 from .tokens import create_access_token
 
 
+def csrf_failure(request, reason=""):
+    messages.error(request, "Security token refreshed. Please submit the form again.")
+    response = redirect("login")
+    response.delete_cookie(settings.CSRF_COOKIE_NAME, path="/")
+    response.delete_cookie(settings.ACCESS_COOKIE_NAME, path="/")
+    return response
+
+
 def _safe_next_url(next_url):
     if not next_url:
         return ""

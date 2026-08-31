@@ -61,6 +61,8 @@ For local Docker, both compose files default to:
 ```text
 AUTH_SHARED_SECRET=dev-only-change-me
 ACCESS_COOKIE_NAME=lst_access_token
+DJANGO_SESSION_COOKIE_NAME=admin_panel_sessionid
+DJANGO_CSRF_COOKIE_NAME=admin_panel_csrftoken
 ```
 
 Use `localhost` for both apps. Cookies are shared by host, not port, so `localhost:8000` and `localhost:3000` work together.

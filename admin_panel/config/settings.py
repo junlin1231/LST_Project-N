@@ -9,6 +9,9 @@ AUTH_SHARED_SECRET = os.environ.get("AUTH_SHARED_SECRET", "dev-only-change-me")
 ACCOUNTING_APP_URL = os.environ.get("ACCOUNTING_APP_URL", "http://localhost:3000")
 ACCESS_COOKIE_NAME = os.environ.get("ACCESS_COOKIE_NAME", "lst_access_token")
 ACCESS_COOKIE_MAX_AGE = int(os.environ.get("ACCESS_COOKIE_MAX_AGE", "43200"))
+SESSION_COOKIE_NAME = os.environ.get("DJANGO_SESSION_COOKIE_NAME", "admin_panel_sessionid")
+CSRF_COOKIE_NAME = os.environ.get("DJANGO_CSRF_COOKIE_NAME", "admin_panel_csrftoken")
+CSRF_FAILURE_VIEW = "access.views.csrf_failure"
 DEBUG = os.environ.get("DJANGO_DEBUG", "1") == "1"
 ALLOWED_HOSTS = [host.strip() for host in os.environ.get("DJANGO_ALLOWED_HOSTS", "127.0.0.1,localhost").split(",") if host.strip()]
 

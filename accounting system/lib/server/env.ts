@@ -10,7 +10,12 @@ export interface ServerEnv {
   aiApiKey?: string
   aiModel: string
   aiProvider: string
+  aiOcrTimeoutMs: number
+  aiBankOcrPageTimeoutMs: number
 }
+
+const DEFAULT_AI_OCR_TIMEOUT_SECONDS = 180
+const DEFAULT_AI_BANK_OCR_PAGE_TIMEOUT_SECONDS = 180
 
 function localEnvPaths() {
   const cwd = process.cwd()
@@ -36,6 +41,8 @@ export function getServerEnvDiagnostics() {
     hasAiApiKey: !!aiApiKey,
     aiModel: envValue(localEnv, "LLM_MODEL", "LLM_GEMMA4_MODEL", "AI_MODEL") ?? "gemma-4",
     aiProvider: (envValue(localEnv, "LLM_PROVIDER") ?? "openai").toLowerCase(),
+    aiOcrTimeoutSeconds: envPositiveInteger(localEnv, DEFAULT_AI_OCR_TIMEOUT_SECONDS, "AI_OCR_TIMEOUT_SECONDS", "OCR_TIMEOUT_SECONDS"),
+    aiBankOcrPageTimeoutSeconds: envPositiveInteger(localEnv, DEFAULT_AI_BANK_OCR_PAGE_TIMEOUT_SECONDS, "AI_BANK_OCR_PAGE_TIMEOUT_SECONDS", "BANK_OCR_PAGE_TIMEOUT_SECONDS"),
   }
 }
 
@@ -62,6 +69,13 @@ function envValue(values: Record<string, string>, ...names: string[]) {
     if (value && value.trim()) return value.trim()
   }
   return undefined
+}
+
+function envPositiveInteger(values: Record<string, string>, defaultValue: number, ...names: string[]) {
+  const raw = envValue(values, ...names)
+  if (!raw) return defaultValue
+  const parsed = Number.parseInt(raw, 10)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : defaultValue
 }
 
 export function getServerEnv(): ServerEnv {
@@ -100,5 +114,7 @@ export function getServerEnv(): ServerEnv {
     aiApiKey: envValue(localEnv, "BEARER_TOKEN", "AI_API_KEY"),
     aiModel: envValue(localEnv, "LLM_MODEL", "LLM_GEMMA4_MODEL", "AI_MODEL") ?? "gemma-4",
     aiProvider: (envValue(localEnv, "LLM_PROVIDER") ?? "openai").toLowerCase(),
+    aiOcrTimeoutMs: envPositiveInteger(localEnv, DEFAULT_AI_OCR_TIMEOUT_SECONDS, "AI_OCR_TIMEOUT_SECONDS", "OCR_TIMEOUT_SECONDS") * 1000,
+    aiBankOcrPageTimeoutMs: envPositiveInteger(localEnv, DEFAULT_AI_BANK_OCR_PAGE_TIMEOUT_SECONDS, "AI_BANK_OCR_PAGE_TIMEOUT_SECONDS", "BANK_OCR_PAGE_TIMEOUT_SECONDS") * 1000,
   }
 }

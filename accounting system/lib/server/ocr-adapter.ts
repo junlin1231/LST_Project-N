@@ -12,8 +12,6 @@ import { getServerEnv } from "./env"
 import type { ReceiptRegion } from "./receipt-splitter"
 
 const execFileAsync = promisify(execFile)
-const BANK_OCR_PAGE_TIMEOUT_MS = 45_000
-const DOCUMENT_OCR_TIMEOUT_MS = 120_000
 
 export interface OcrResult {
   rawText: string
@@ -257,7 +255,7 @@ async function detectReceiptRegionsWithGemma(input: { filePath: string; mimeType
         },
       ],
     }),
-  }, 120_000) as { choices?: Array<{ message?: { content?: string } }> }
+  }, env.aiOcrTimeoutMs, { retries: 2 }) as { choices?: Array<{ message?: { content?: string } }> }
   const json = extractJsonObject(payload.choices?.[0]?.message?.content ?? "")
   const regions = normalizeReceiptRegions(json?.receipts)
   return regions.length > 1 ? regions : []
@@ -497,7 +495,7 @@ async function extractWithGemmaEndpoint(input: { filePath: string; mimeType: str
           },
         ],
       }),
-    }, likelyBankStatement ? BANK_OCR_PAGE_TIMEOUT_MS : DOCUMENT_OCR_TIMEOUT_MS) as { choices?: Array<{ message?: { content?: string } }> }
+    }, likelyBankStatement ? env.aiBankOcrPageTimeoutMs : env.aiOcrTimeoutMs, { retries: 2 }) as { choices?: Array<{ message?: { content?: string } }> }
     const content = payload.choices?.[0]?.message?.content ?? ""
     const json = extractJsonObject(content)
     if (!json) throw new Error("Gemma OCR endpoint did not return JSON.")
