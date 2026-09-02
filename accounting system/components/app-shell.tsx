@@ -9,6 +9,7 @@ import {
   Files,
   Landmark,
   LayoutDashboard,
+  LogOut,
   Menu,
   Package,
   ReceiptText,
@@ -19,7 +20,7 @@ import { cn } from "@/lib/utils"
 import { useAccounting } from "@/lib/accounting/store"
 import { useCompany } from "@/lib/accounting/company-store"
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet"
-import { Button } from "@/components/ui/button"
+import { Button, buttonVariants } from "@/components/ui/button"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 
 const NAV = [
@@ -124,6 +125,16 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
         <CompanySwitcher />
         <NavList />
+        <a
+          href="/api/auth/logout"
+          className={cn(
+            buttonVariants({ variant: "ghost" }),
+            "justify-start text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-foreground",
+          )}
+        >
+          <LogOut className="size-4" />
+          Logout
+        </a>
         <div className="mt-auto rounded-md bg-sidebar-accent/40 p-3 text-[11px] leading-relaxed text-sidebar-foreground/60">
           Database mode &middot; accounting records persist in PostgreSQL.
         </div>
@@ -148,6 +159,16 @@ export function AppShell({ children }: { children: ReactNode }) {
                 <CompanySwitcher />
               </div>
               <NavList onNavigate={() => setOpen(false)} />
+              <a
+                href="/api/auth/logout"
+                className={cn(
+                  buttonVariants({ variant: "ghost" }),
+                  "mt-4 w-full justify-start text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-foreground",
+                )}
+              >
+                <LogOut className="size-4" />
+                Logout
+              </a>
             </SheetContent>
           </Sheet>
           <div className="flex items-center gap-2">

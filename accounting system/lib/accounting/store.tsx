@@ -60,6 +60,7 @@ interface Store {
   addAdjustmentJournalEntry: (originalId: string, entry: Omit<JournalEntry, "id">, confirmation: ConfirmationMetadata) => void
   addAccount: (account: Omit<Account, "id">) => void
   addContact: (contact: Omit<Contact, "id">) => void
+  updateContact: (id: string, contact: Omit<Contact, "id">) => void
   addStockItem: (item: Omit<StockItem, "id">) => void
   addWarehouse: (warehouse: Omit<Warehouse, "id">) => void
   addFixedAsset: (asset: Omit<FixedAsset, "id">) => Promise<void>
@@ -83,6 +84,7 @@ interface Store {
   refreshAccountingData: () => Promise<void>
   loadDemoData: () => Promise<void>
   resetSystemData: () => Promise<void>
+  resetAndLoadDemoData: () => Promise<void>
   // derived
   accountName: (id: string) => string
   balances: AccountBalance[]
@@ -225,6 +227,12 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
       .catch(console.error)
   }, [])
 
+  const updateContactAction = useCallback((id: string, contact: Omit<Contact, "id">) => {
+    void postAccountingAction<Contact>({ action: "updateContact", id, contact })
+      .then((updated) => setContacts((prev) => prev.map((existing) => existing.id === id ? updated : existing).sort((a, b) => a.name.localeCompare(b.name))))
+      .catch(console.error)
+  }, [])
+
   const addStockItem = useCallback((item: Omit<StockItem, "id">) => {
     void postAccountingAction<StockItem>({ action: "createStockItem", item })
       .then((created) => setStockItems((prev) => [...prev, created].sort((a, b) => a.sku.localeCompare(b.sku))))
@@ -364,6 +372,11 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
     applySnapshot(snapshot)
   }, [applySnapshot])
 
+  const resetAndLoadDemoDataAction = useCallback(async () => {
+    const snapshot = await postAccountingAction<AccountingSnapshot>({ action: "resetAndLoadDemoData" })
+    applySnapshot(snapshot)
+  }, [applySnapshot])
+
   const accountsById = useMemo(() => {
     const map = new Map<string, Account>()
     accounts.forEach((a) => map.set(a.id, a))
@@ -415,6 +428,7 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
     addAdjustmentJournalEntry,
     addAccount,
     addContact,
+    updateContact: updateContactAction,
     addStockItem,
     addWarehouse,
     addFixedAsset: addFixedAssetAction,
@@ -438,6 +452,7 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
     refreshAccountingData: refresh,
     loadDemoData: loadDemoDataAction,
     resetSystemData: resetSystemDataAction,
+    resetAndLoadDemoData: resetAndLoadDemoDataAction,
     accountName,
     balances,
     balanceOf,

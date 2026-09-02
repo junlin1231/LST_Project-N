@@ -1,0 +1,5 @@
+ALTER TABLE contacts
+  ADD COLUMN IF NOT EXISTS address_line1 TEXT,
+  ADD COLUMN IF NOT EXISTS address_line2 TEXT,
+  ADD COLUMN IF NOT EXISTS address_line3 TEXT,
+  ADD COLUMN IF NOT EXISTS address_line4 TEXT;

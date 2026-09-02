@@ -63,13 +63,13 @@ export const demoDepreciationSchedules: DepreciationSchedule[] = [
 ]
 
 export const demoContacts: Contact[] = [
-  { id: "c1", name: "Stellar Technology Ltd.", type: "client", email: "billing@stellar.example", phone: "021-5588-1234", taxId: "91310000MA1K2X3Y4Z", creditLimit: 120000 },
-  { id: "c2", name: "Blue Ocean Design Studio", type: "client", email: "hello@blueocean.example", phone: "010-6688-9900", creditLimit: 90000 },
-  { id: "c3", name: "Horizon Media Group", type: "client", email: "finance@horizon.example", phone: "020-3344-5566", taxId: "91440000MA5A6B7C8D", creditLimit: 100000 },
-  { id: "c4", name: "Huitong Logistics", type: "client", email: "ap@huitong.example", phone: "0755-2233-4455", creditLimit: 95000 },
-  { id: "v1", name: "Central Property Leasing", type: "vendor", email: "rent@property.example", phone: "021-8888-0001" },
-  { id: "v2", name: "Cloud Services Vendor", type: "vendor", email: "invoice@cloudvendor.example" },
-  { id: "v3", name: "Office Supply Partner", type: "vendor", email: "sales@officesupply.example", phone: "021-7777-2222" },
+  { id: "c1", name: "Stellar Technology Ltd.", type: "client", email: "billing@stellar.example", phone: "021-5588-1234", taxId: "91310000MA1K2X3Y4Z", addressLines: ["Level 18, Innovation Tower", "88 Century Avenue", "Pudong New Area", "Shanghai 200120"], creditLimit: 120000 },
+  { id: "c2", name: "Blue Ocean Design Studio", type: "client", email: "hello@blueocean.example", phone: "010-6688-9900", addressLines: ["Suite 602, Creative Park", "19 Guanghua Road", "Chaoyang District", "Beijing 100020"], creditLimit: 90000 },
+  { id: "c3", name: "Horizon Media Group", type: "client", email: "finance@horizon.example", phone: "020-3344-5566", taxId: "91440000MA5A6B7C8D", addressLines: ["Unit 12A, Pearl Media Plaza", "268 Tianhe Road", "Tianhe District", "Guangzhou 510620"], creditLimit: 100000 },
+  { id: "c4", name: "Huitong Logistics", type: "client", email: "ap@huitong.example", phone: "0755-2233-4455", addressLines: ["Warehouse Block B", "36 Yantian Port Road", "Yantian District", "Shenzhen 518083"], creditLimit: 95000 },
+  { id: "v1", name: "Central Property Leasing", type: "vendor", email: "rent@property.example", phone: "021-8888-0001", addressLines: ["Property Management Office", "388 Huaihai Middle Road", "Huangpu District", "Shanghai 200021"] },
+  { id: "v2", name: "Cloud Services Vendor", type: "vendor", email: "invoice@cloudvendor.example", addressLines: ["Billing Department", "12 Cloud Avenue", "Cyberjaya", "Selangor 63000"] },
+  { id: "v3", name: "Office Supply Partner", type: "vendor", email: "sales@officesupply.example", phone: "021-7777-2222", addressLines: ["Lot 5, Supply Hub", "66 Minhang Road", "Minhang District", "Shanghai 201100"] },
 ]
 
 export const demoStockItems: StockItem[] = [

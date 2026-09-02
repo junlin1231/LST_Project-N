@@ -5,6 +5,7 @@ const AUTH_SHARED_SECRET = process.env.AUTH_SHARED_SECRET || "dev-only-change-me
 const DJANGO_LOGIN_URL = process.env.DJANGO_LOGIN_URL || "http://localhost:8000/login/"
 
 const PUBLIC_PREFIXES = ["/_next", "/favicon.ico", "/icon", "/apple-icon", "/placeholder"]
+const PUBLIC_PATHS = ["/api/auth/logout"]
 
 function base64UrlToBytes(value: string) {
   const normalized = value.replace(/-/g, "+").replace(/_/g, "/")
@@ -61,6 +62,9 @@ function loginRedirect(request: NextRequest) {
 
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl
+  if (PUBLIC_PATHS.includes(pathname)) {
+    return NextResponse.next()
+  }
   if (PUBLIC_PREFIXES.some((prefix) => pathname.startsWith(prefix))) {
     return NextResponse.next()
   }

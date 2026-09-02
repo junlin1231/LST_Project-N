@@ -1,5 +1,6 @@
 import "server-only"
 
+import { normalizeInvoicePdfSettings, type InvoicePdfSettings } from "@/lib/accounting/invoice-pdf-settings"
 import { currentCompanyId } from "./auth-context"
 import { ensureDatabaseReady, query } from "./db"
 
@@ -15,6 +16,7 @@ interface CompanySettingsRow {
   legal_name: string | null
   tax_id: string | null
   ocr_own_names: string[]
+  invoice_pdf_settings?: unknown
 }
 
 function normalizeOwnNames(values: unknown) {
@@ -68,4 +70,43 @@ export async function updateOcrOwnNamesSettings(input: { ownNames: unknown }): P
     taxId: company.tax_id ?? "",
     ownNames: normalizeOwnNames(company.ocr_own_names),
   }
+}
+
+export async function getInvoicePdfSettings(): Promise<InvoicePdfSettings> {
+  await ensureDatabaseReady()
+  const result = await query<CompanySettingsRow>(
+    `SELECT name, legal_name, tax_id, ocr_own_names, invoice_pdf_settings
+     FROM companies
+     WHERE id = $1
+     LIMIT 1`,
+    [currentCompanyId()],
+  )
+  const company = result.rows[0]
+  if (!company) throw new Error("Company was not found.")
+
+  const storedSettings =
+    typeof company.invoice_pdf_settings === "object" && company.invoice_pdf_settings
+      ? company.invoice_pdf_settings as Partial<InvoicePdfSettings>
+      : {}
+  return normalizeInvoicePdfSettings({
+    ...storedSettings,
+    companyName: company.legal_name || company.name,
+    registrationNo: company.tax_id || "",
+  })
+}
+
+export async function updateInvoicePdfSettings(input: unknown): Promise<InvoicePdfSettings> {
+  await ensureDatabaseReady()
+  const settings = normalizeInvoicePdfSettings(input)
+  const result = await query<CompanySettingsRow>(
+    `UPDATE companies
+     SET invoice_pdf_settings = $1::JSONB, updated_at = NOW()
+     WHERE id = $2
+     RETURNING name, legal_name, tax_id, ocr_own_names, invoice_pdf_settings`,
+    [JSON.stringify(settings), currentCompanyId()],
+  )
+  const company = result.rows[0]
+  if (!company) throw new Error("Company was not found.")
+
+  return normalizeInvoicePdfSettings(company.invoice_pdf_settings)
 }

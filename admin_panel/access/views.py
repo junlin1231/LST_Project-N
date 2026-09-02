@@ -70,10 +70,10 @@ class AccessLoginView(LoginView):
         user.save(update_fields=["last_login_at"])
         login(self.request, user)
         next_url = _safe_next_url(self.request.POST.get("next") or self.request.GET.get("next"))
-        if next_url:
-            response = redirect(next_url)
-        elif user.is_access_admin:
+        if user.is_access_admin:
             response = redirect("admin_dashboard")
+        elif next_url:
+            response = redirect(next_url)
         else:
             response = redirect(settings.ACCOUNTING_APP_URL)
         response.set_cookie(

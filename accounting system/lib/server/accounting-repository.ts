@@ -82,6 +82,10 @@ interface ContactRow {
   email: string
   phone: string | null
   tax_id: string | null
+  address_line1: string | null
+  address_line2: string | null
+  address_line3: string | null
+  address_line4: string | null
   credit_limit: string | null
 }
 
@@ -296,6 +300,7 @@ function mapContact(row: ContactRow): Contact {
     email: row.email,
     phone: row.phone ?? undefined,
     taxId: row.tax_id ?? undefined,
+    addressLines: [row.address_line1, row.address_line2, row.address_line3, row.address_line4].filter(Boolean) as string[],
     creditLimit: row.credit_limit === null ? undefined : Number(row.credit_limit),
   }
 }
@@ -698,14 +703,18 @@ export async function loadDemoData() {
     for (const contact of demoContacts) {
       await exec(
         client,
-        `INSERT INTO contacts (id, company_id, name, type, email, phone, tax_id, credit_limit)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        `INSERT INTO contacts (id, company_id, name, type, email, phone, tax_id, address_line1, address_line2, address_line3, address_line4, credit_limit)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
          ON CONFLICT (id) DO UPDATE SET
           name = EXCLUDED.name,
           type = EXCLUDED.type,
           email = EXCLUDED.email,
           phone = EXCLUDED.phone,
           tax_id = EXCLUDED.tax_id,
+          address_line1 = EXCLUDED.address_line1,
+          address_line2 = EXCLUDED.address_line2,
+          address_line3 = EXCLUDED.address_line3,
+          address_line4 = EXCLUDED.address_line4,
           credit_limit = EXCLUDED.credit_limit,
           updated_at = NOW()`,
         [
@@ -716,6 +725,10 @@ export async function loadDemoData() {
           contact.email,
           contact.phone ?? null,
           contact.taxId ?? null,
+          contact.addressLines?.[0] ?? null,
+          contact.addressLines?.[1] ?? null,
+          contact.addressLines?.[2] ?? null,
+          contact.addressLines?.[3] ?? null,
           contact.creditLimit ?? null,
         ],
       )
@@ -1276,7 +1289,7 @@ export async function listAccountingData() {
 
   const [accounts, contacts, journalEntries, journalLines, invoices, invoiceItems, vendorBills, receipts, paymentVouchers, paymentAllocations, workflowDocuments, workflowDocumentLines, stockItems, warehouses, stockBalances, stockMovements, stockMovementLines, fixedAssets, depreciationSchedules, auditLogs] = await Promise.all([
     query<AccountRow>("SELECT id, code, name, type FROM accounts WHERE company_id = $1 ORDER BY code", [currentCompanyId()]),
-    query<ContactRow>("SELECT id, name, type, email, phone, tax_id, credit_limit::text FROM contacts WHERE company_id = $1 ORDER BY name", [currentCompanyId()]),
+    query<ContactRow>("SELECT id, name, type, email, phone, tax_id, address_line1, address_line2, address_line3, address_line4, credit_limit::text FROM contacts WHERE company_id = $1 ORDER BY name", [currentCompanyId()]),
     query<JournalEntryRow>(
       "SELECT id, date::text, description, reference, status, posted_at::text, reversed_journal_entry_id, adjusted_journal_entry_id FROM journal_entries WHERE company_id = $1 ORDER BY date DESC, created_at DESC",
       [currentCompanyId()],
@@ -1442,7 +1455,7 @@ export async function createContact(contact: Omit<Contact, "id">) {
   await ensureDemoCompany()
   const id = `c-${randomUUID()}`
   await query(
-    "INSERT INTO contacts (id, company_id, name, type, email, phone, tax_id, credit_limit) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+    "INSERT INTO contacts (id, company_id, name, type, email, phone, tax_id, address_line1, address_line2, address_line3, address_line4, credit_limit) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
     [
       id,
       currentCompanyId(),
@@ -1451,10 +1464,52 @@ export async function createContact(contact: Omit<Contact, "id">) {
       contact.email,
       contact.phone ?? null,
       contact.taxId ?? null,
+      contact.addressLines?.[0] ?? null,
+      contact.addressLines?.[1] ?? null,
+      contact.addressLines?.[2] ?? null,
+      contact.addressLines?.[3] ?? null,
       contact.creditLimit ?? null,
     ],
   )
   return { ...contact, id }
+}
+
+export async function updateContact(id: string, contact: Omit<Contact, "id">) {
+  await ensureDatabaseReady()
+  await ensureDemoCompany()
+  const result = await query<ContactRow>(
+    `UPDATE contacts
+     SET name = $1,
+         type = $2,
+         email = $3,
+         phone = $4,
+         tax_id = $5,
+         address_line1 = $6,
+         address_line2 = $7,
+         address_line3 = $8,
+         address_line4 = $9,
+         credit_limit = $10,
+         updated_at = NOW()
+     WHERE id = $11 AND company_id = $12
+     RETURNING id, name, type, email, phone, tax_id, address_line1, address_line2, address_line3, address_line4, credit_limit::text`,
+    [
+      contact.name,
+      contact.type,
+      contact.email,
+      contact.phone ?? null,
+      contact.taxId ?? null,
+      contact.addressLines?.[0] ?? null,
+      contact.addressLines?.[1] ?? null,
+      contact.addressLines?.[2] ?? null,
+      contact.addressLines?.[3] ?? null,
+      contact.creditLimit ?? null,
+      id,
+      currentCompanyId(),
+    ],
+  )
+  const updated = result.rows[0]
+  if (!updated) throw new Error("Contact was not found.")
+  return mapContact(updated)
 }
 
 export async function createStockItem(item: Omit<StockItem, "id">) {

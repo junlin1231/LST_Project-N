@@ -1,7 +1,9 @@
 "use client"
 
 import { useState } from "react"
+import { Pencil } from "lucide-react"
 import { useAccounting } from "@/lib/accounting/store"
+import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
 import { Badge } from "@/components/ui/badge"
@@ -61,6 +63,13 @@ function ContactGrid({ type }: { type: ContactType }) {
                   {typeof contact.creditLimit === "number" ? <p>AR credit limit: {formatCurrency(contact.creditLimit)}</p> : null}
                 </div>
               ) : null}
+              {contact.addressLines?.length ? (
+                <div className="space-y-0.5 text-xs text-muted-foreground">
+                  {contact.addressLines.slice(0, 4).map((line, index) => (
+                    <p key={`${contact.id}-address-${index}`} className="truncate">{line}</p>
+                  ))}
+                </div>
+              ) : null}
               <div className="flex items-center justify-between border-t border-border pt-3 text-sm">
                 {type === "client" ? (
                   <>
@@ -79,6 +88,16 @@ function ContactGrid({ type }: { type: ContactType }) {
                 ) : (
                   <span className="text-muted-foreground">AP bill tracking pending</span>
                 )}
+                <NewContactDialog
+                  defaultType={type}
+                  contact={contact}
+                  trigger={
+                    <Button size="sm" variant="outline">
+                      <Pencil className="size-4" />
+                      Edit
+                    </Button>
+                  }
+                />
               </div>
             </CardContent>
           </Card>

@@ -53,6 +53,7 @@ export interface Contact {
   email: string
   phone?: string
   taxId?: string
+  addressLines?: string[]
   creditLimit?: number
 }
 

@@ -1,0 +1,2 @@
+ALTER TABLE companies
+  ADD COLUMN IF NOT EXISTS invoice_pdf_settings JSONB NOT NULL DEFAULT '{}'::JSONB;

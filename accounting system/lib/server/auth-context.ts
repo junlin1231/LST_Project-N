@@ -1,6 +1,6 @@
 import "server-only"
 
-import { randomUUID } from "node:crypto"
+import { createHmac, timingSafeEqual, randomUUID } from "node:crypto"
 import type { NextRequest } from "next/server"
 import { ensureDatabaseReady, query, transaction } from "./db"
 import {
@@ -31,6 +31,41 @@ interface MembershipRow {
 
 function requestUserId(request: NextRequest) {
   return request.cookies.get(SESSION_COOKIE_NAME)?.value.trim() || request.headers.get("x-user-id")?.trim()
+}
+
+function base64UrlDecode(value: string) {
+  const normalized = value.replace(/-/g, "+").replace(/_/g, "/")
+  const padded = normalized.padEnd(normalized.length + ((4 - (normalized.length % 4)) % 4), "=")
+  return Buffer.from(padded, "base64")
+}
+
+function base64UrlEncode(value: Buffer) {
+  return value.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")
+}
+
+function verifiedDjangoAccess(request: NextRequest) {
+  const token = request.cookies.get(process.env.ACCESS_COOKIE_NAME || "lst_access_token")?.value
+  if (!token) return null
+
+  const [payloadPart, signaturePart] = token.split(".")
+  if (!payloadPart || !signaturePart) return null
+
+  const expected = createHmac("sha256", process.env.AUTH_SHARED_SECRET || "dev-only-change-me").update(payloadPart).digest()
+  const actual = base64UrlDecode(signaturePart)
+  if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) return null
+
+  const payload = JSON.parse(base64UrlDecode(payloadPart).toString("utf8")) as {
+    email?: string
+    exp?: number
+    role?: string
+    status?: string
+  }
+  const notExpired = typeof payload.exp === "number" && payload.exp > Math.floor(Date.now() / 1000)
+  if (!notExpired || payload.status !== "active" || payload.role !== "user" || !payload.email) return null
+
+  const signatureCheck = base64UrlEncode(expected)
+  if (signatureCheck !== signaturePart) return null
+  return { email: payload.email }
 }
 
 async function ensureDemoPrincipal() {
@@ -93,8 +128,13 @@ export async function resolveActiveMembership(userId: string, requestedCompanyId
 }
 
 export async function requireTenantContext(request: NextRequest): Promise<TenantContext> {
-  const userId = requestUserId(request)
-  if (!userId) throw new Error("Sign in is required.")
+  let userId = requestUserId(request)
+  if (!userId) {
+    const djangoUser = verifiedDjangoAccess(request)
+    if (!djangoUser) throw new Error("Sign in is required.")
+    const accountingUser = await loginByEmail({ email: djangoUser.email })
+    userId = accountingUser.id
+  }
   const ctx = await resolveActiveMembership(userId, request.headers.get("x-company-id"))
   if (!ctx) throw new Error("Company access denied.")
   return ctx

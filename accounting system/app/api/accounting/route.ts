@@ -26,6 +26,7 @@ import {
   resetSystemData,
   updateDraftJournalEntry,
   updateFixedAsset,
+  updateContact,
   updateInvoiceStatus,
   updateStockItem,
   updateVendorBillStatus,
@@ -80,7 +81,7 @@ export async function POST(request: NextRequest) {
   try {
     return await withTenantContext(request, async (ctx) => {
       const body = await request.json()
-      if (body.action === "resetSystemData") {
+      if (body.action === "resetSystemData" || body.action === "resetAndLoadDemoData") {
         requireRole(ctx, ["owner"])
       } else if (body.action === "reverseJournalEntry" || body.action === "createAdjustmentJournalEntry") {
         requireRole(ctx, [...ACCOUNTING_CONTROL_ROLES])
@@ -93,6 +94,8 @@ export async function POST(request: NextRequest) {
           return NextResponse.json(await createAccount(body.account as Omit<Account, "id">))
         case "createContact":
           return NextResponse.json(await createContact(body.contact as Omit<Contact, "id">))
+        case "updateContact":
+          return NextResponse.json(await updateContact(String(body.id), body.contact as Omit<Contact, "id">))
         case "createStockItem":
           return NextResponse.json(await createStockItem(body.item as Omit<StockItem, "id">))
         case "createWarehouse":
@@ -178,6 +181,10 @@ export async function POST(request: NextRequest) {
           return NextResponse.json(await listAccountingData())
         case "resetSystemData":
           await resetSystemData()
+          return NextResponse.json(await listAccountingData())
+        case "resetAndLoadDemoData":
+          await resetSystemData()
+          await loadDemoData()
           return NextResponse.json(await listAccountingData())
         default:
           return NextResponse.json({ error: "Unknown accounting action." }, { status: 400 })
