@@ -15,6 +15,7 @@ import {
 import type { Invoice, JournalEntry } from "@/lib/accounting/types"
 import { ensureDatabaseReady, query, transaction, type DbExecutor } from "./db"
 import { currentCompanyId, getInvoice, insertJournalEntry } from "./accounting-repository"
+import { DEMO_COMPANY_ID } from "./tenant-context"
 
 interface RuleMappingRow {
   ruleset_name: string
@@ -25,6 +26,10 @@ interface RuleMappingRow {
   tax_payable_account_id: string
   expense_account_id: string
   accounts_payable_account_id: string
+}
+
+interface AccountIdRow {
+  id: string
 }
 
 function mapRuleConfig(row: RuleMappingRow): AccountingRuleConfig {
@@ -44,24 +49,52 @@ async function exec(db: DbExecutor, sql: string, values?: unknown[]) {
   return db.query(sql, values)
 }
 
+export function defaultAccountIdForCompany(code: string, companyId = currentCompanyId()) {
+  return companyId === DEMO_COMPANY_ID ? code : `${companyId}-${code}`
+}
+
+export async function accountIdForCode(code: string, fallback = defaultAccountIdForCompany(code)) {
+  const result = await query<AccountIdRow>(
+    "SELECT id FROM accounts WHERE company_id = $1 AND code = $2 LIMIT 1",
+    [currentCompanyId(), code],
+  )
+  return result.rows[0]?.id ?? fallback
+}
+
+function defaultRuleMappingId(companyId = currentCompanyId()) {
+  return companyId === DEMO_COMPANY_ID ? "rule-map-default-v1" : `rule-map-${companyId}-default-v1`
+}
+
+async function upsertDefaultAccount(db: DbExecutor, account: { id: string; code: string; name: string; type: string }) {
+  const result = await db.query<AccountIdRow>(
+    `INSERT INTO accounts (id, company_id, code, name, type)
+     VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT (company_id, code) DO UPDATE
+     SET name = EXCLUDED.name, type = EXCLUDED.type, updated_at = NOW()
+     RETURNING id`,
+    [account.id, currentCompanyId(), account.code, account.name, account.type],
+  )
+  return result.rows[0]?.id ?? account.id
+}
+
 async function seedDefaultRuleAccounts(db: DbExecutor) {
   const accounts = [
-    { id: DEFAULT_ACCOUNTING_RULE_CONFIG.accountsReceivableAccountId, code: "1200", name: "Trade Receivables", type: "asset" },
-    { id: DEFAULT_ACCOUNTING_RULE_CONFIG.cashAccountId, code: "1010", name: "Cash / Bank", type: "asset" },
-    { id: DEFAULT_ACCOUNTING_RULE_CONFIG.revenueAccountId, code: "4000", name: "Sales Revenue", type: "revenue" },
-    { id: DEFAULT_ACCOUNTING_RULE_CONFIG.taxPayableAccountId, code: "2100", name: "Tax Payable", type: "liability" },
-    { id: DEFAULT_ACCOUNTING_RULE_CONFIG.expenseAccountId, code: "5300", name: "General Expenses", type: "expense" },
-    { id: DEFAULT_ACCOUNTING_RULE_CONFIG.accountsPayableAccountId, code: "2000", name: "Accounts Payable", type: "liability" },
-    { id: "5000", code: "5000", name: "Rent Expense", type: "expense" },
-    { id: "5100", code: "5100", name: "Salary Expense", type: "expense" },
-    { id: "5200", code: "5200", name: "Utilities Expense", type: "expense" },
-    { id: "5400", code: "5400", name: "Marketing Expense", type: "expense" },
-    { id: "5500", code: "5500", name: "Software Subscriptions", type: "expense" },
-    { id: "5600", code: "5600", name: "Cost of Goods Sold", type: "expense" },
-    { id: "5700", code: "5700", name: "Depreciation Expense", type: "expense" },
-    { id: "5800", code: "5800", name: "Meals and Entertainment", type: "expense" },
-    { id: "5900", code: "5900", name: "Travel Expense", type: "expense" },
-    { id: "5950", code: "5950", name: "Fuel and Transport Expense", type: "expense" },
+    { code: "1200", name: "Trade Receivables", type: "asset" },
+    { code: "1010", name: "Cash / Bank", type: "asset" },
+    { code: "4000", name: "Sales Revenue", type: "revenue" },
+    { code: "2100", name: "Tax Payable", type: "liability" },
+    { code: "5300", name: "General Expenses", type: "expense" },
+    { code: "2000", name: "Accounts Payable", type: "liability" },
+    { code: "5000", name: "Rent Expense", type: "expense" },
+    { code: "5100", name: "Salary Expense", type: "expense" },
+    { code: "5200", name: "Utilities Expense", type: "expense" },
+    { code: "5400", name: "Marketing Expense", type: "expense" },
+    { code: "5500", name: "Software Subscriptions", type: "expense" },
+    { code: "5600", name: "Cost of Goods Sold", type: "expense" },
+    { code: "5700", name: "Depreciation Expense", type: "expense" },
+    { code: "5800", name: "Meals and Entertainment", type: "expense" },
+    { code: "5900", name: "Travel Expense", type: "expense" },
+    { code: "5950", name: "Fuel and Transport Expense", type: "expense" },
   ]
 
   await exec(
@@ -76,21 +109,29 @@ async function seedDefaultRuleAccounts(db: DbExecutor) {
     [currentCompanyId(), "Demo Company", "MYR"],
   )
 
+  const idsByCode: Record<string, string> = {}
   for (const account of accounts) {
-    await exec(
-      db,
-      `INSERT INTO accounts (id, company_id, code, name, type)
-       VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, updated_at = NOW()`,
-      [account.id, currentCompanyId(), account.code, account.name, account.type],
-    )
+    idsByCode[account.code] = await upsertDefaultAccount(db, {
+      id: defaultAccountIdForCompany(account.code),
+      ...account,
+    })
+  }
+
+  return {
+    ...DEFAULT_ACCOUNTING_RULE_CONFIG,
+    accountsReceivableAccountId: idsByCode["1200"] ?? DEFAULT_ACCOUNTING_RULE_CONFIG.accountsReceivableAccountId,
+    cashAccountId: idsByCode["1010"] ?? DEFAULT_ACCOUNTING_RULE_CONFIG.cashAccountId,
+    revenueAccountId: idsByCode["4000"] ?? DEFAULT_ACCOUNTING_RULE_CONFIG.revenueAccountId,
+    taxPayableAccountId: idsByCode["2100"] ?? DEFAULT_ACCOUNTING_RULE_CONFIG.taxPayableAccountId,
+    expenseAccountId: idsByCode["5300"] ?? DEFAULT_ACCOUNTING_RULE_CONFIG.expenseAccountId,
+    accountsPayableAccountId: idsByCode["2000"] ?? DEFAULT_ACCOUNTING_RULE_CONFIG.accountsPayableAccountId,
   }
 }
 
 export async function seedDefaultRuleMapping() {
   await ensureDatabaseReady()
   await transaction(async (client) => {
-    await seedDefaultRuleAccounts(client)
+    const config = await seedDefaultRuleAccounts(client)
     await exec(
       client,
       `INSERT INTO accounting_rule_mappings (
@@ -106,18 +147,25 @@ export async function seedDefaultRuleMapping() {
         accounts_payable_account_id,
         is_active
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, TRUE)
-      ON CONFLICT (company_id, ruleset_name, version) DO NOTHING`,
+      ON CONFLICT (company_id, ruleset_name, version) DO UPDATE
+      SET accounts_receivable_account_id = EXCLUDED.accounts_receivable_account_id,
+          cash_account_id = EXCLUDED.cash_account_id,
+          revenue_account_id = EXCLUDED.revenue_account_id,
+          tax_payable_account_id = EXCLUDED.tax_payable_account_id,
+          expense_account_id = EXCLUDED.expense_account_id,
+          accounts_payable_account_id = EXCLUDED.accounts_payable_account_id,
+          is_active = TRUE`,
       [
-        "rule-map-default-v1",
+        defaultRuleMappingId(),
         currentCompanyId(),
-        DEFAULT_ACCOUNTING_RULE_CONFIG.rulesetName,
-        DEFAULT_ACCOUNTING_RULE_CONFIG.version,
-        DEFAULT_ACCOUNTING_RULE_CONFIG.accountsReceivableAccountId,
-        DEFAULT_ACCOUNTING_RULE_CONFIG.cashAccountId,
-        DEFAULT_ACCOUNTING_RULE_CONFIG.revenueAccountId,
-        DEFAULT_ACCOUNTING_RULE_CONFIG.taxPayableAccountId,
-        DEFAULT_ACCOUNTING_RULE_CONFIG.expenseAccountId,
-        DEFAULT_ACCOUNTING_RULE_CONFIG.accountsPayableAccountId,
+        config.rulesetName,
+        config.version,
+        config.accountsReceivableAccountId,
+        config.cashAccountId,
+        config.revenueAccountId,
+        config.taxPayableAccountId,
+        config.expenseAccountId,
+        config.accountsPayableAccountId,
       ],
     )
   })

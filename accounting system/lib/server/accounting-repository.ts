@@ -33,6 +33,7 @@ import {
 } from "@/lib/accounting/governance"
 import type {
   Account,
+  AccountingPeriod,
   AuditLog,
   Contact,
   DepreciationSchedule,
@@ -43,6 +44,7 @@ import type {
   OpeningStockInput,
   PaymentAllocation,
   PaymentVoucher,
+  PeriodUnlockRequest,
   Receipt,
   StockBalance,
   StockItem,
@@ -52,8 +54,9 @@ import type {
   Warehouse,
   WorkflowDocument,
   WorkflowDocumentLine,
+  YearEndClosePreview,
 } from "@/lib/accounting/types"
-import { buildDepreciationScheduleDrafts, buildPeriodClosePreview, DEFAULT_RETAINED_EARNINGS_ACCOUNT_ID } from "@/lib/accounting/reports"
+import { buildDepreciationScheduleDrafts, buildPeriodClosePreview, buildYearEndClosePreview, DEFAULT_RETAINED_EARNINGS_ACCOUNT_ID } from "@/lib/accounting/reports"
 import { DEFAULT_ACCOUNTING_RULE_CONFIG, roundMoney } from "@/lib/accounting/rules"
 import { currentCompanyId, currentUserId, DEMO_COMPANY_ID, DEMO_USER_ID } from "./auth-context"
 import { ensureDatabaseReady, query, transaction, type DbExecutor } from "./db"
@@ -98,6 +101,9 @@ interface JournalEntryRow {
   posted_at: string | null
   reversed_journal_entry_id: string | null
   adjusted_journal_entry_id: string | null
+  system_generated: boolean
+  generation_source: string | null
+  locked_by_period_id: string | null
 }
 
 interface JournalLineRow {
@@ -283,6 +289,31 @@ interface AuditLogRow {
   created_at: string
 }
 
+interface AccountingPeriodRow {
+  id: string
+  name: string
+  start_date: string
+  end_date: string
+  status: AccountingPeriod["status"]
+  period_type: AccountingPeriod["periodType"] | null
+  fiscal_year: number | null
+  locked_at: string | null
+  unlocked_at: string | null
+  unlock_expires_at: string | null
+}
+
+interface PeriodUnlockRequestRow {
+  id: string
+  period_id: string
+  status: PeriodUnlockRequest["status"]
+  reason: string
+  impact_summary: string
+  allowed_until: string | null
+  rejection_reason: string | null
+  created_at: string
+  decided_at: string | null
+}
+
 function toIsoDate(value: string | Date) {
   if (value instanceof Date) return value.toISOString().slice(0, 10)
   return value.slice(0, 10)
@@ -326,6 +357,9 @@ function mapJournalEntries(rows: JournalEntryRow[], lines: JournalLineRow[]): Jo
     postedAt: row.posted_at ? new Date(row.posted_at).toISOString() : undefined,
     reversedJournalEntryId: row.reversed_journal_entry_id ?? undefined,
     adjustedJournalEntryId: row.adjusted_journal_entry_id ?? undefined,
+    systemGenerated: row.system_generated,
+    generationSource: row.generation_source ?? undefined,
+    lockedByPeriodId: row.locked_by_period_id ?? undefined,
     lines: byEntryId.get(row.id) ?? [],
   }))
 }
@@ -542,6 +576,35 @@ function mapAuditLog(row: AuditLogRow): AuditLog {
   }
 }
 
+function mapAccountingPeriod(row: AccountingPeriodRow): AccountingPeriod {
+  return {
+    id: row.id,
+    name: row.name,
+    startDate: toIsoDate(row.start_date),
+    endDate: toIsoDate(row.end_date),
+    status: row.status,
+    periodType: row.period_type ?? undefined,
+    fiscalYear: row.fiscal_year ?? undefined,
+    lockedAt: row.locked_at ? new Date(row.locked_at).toISOString() : undefined,
+    unlockedAt: row.unlocked_at ? new Date(row.unlocked_at).toISOString() : undefined,
+    unlockExpiresAt: row.unlock_expires_at ? new Date(row.unlock_expires_at).toISOString() : undefined,
+  }
+}
+
+function mapPeriodUnlockRequest(row: PeriodUnlockRequestRow): PeriodUnlockRequest {
+  return {
+    id: row.id,
+    periodId: row.period_id,
+    status: row.status,
+    reason: row.reason,
+    impactSummary: row.impact_summary,
+    allowedUntil: row.allowed_until ? new Date(row.allowed_until).toISOString() : undefined,
+    rejectionReason: row.rejection_reason ?? undefined,
+    createdAt: new Date(row.created_at).toISOString(),
+    decidedAt: row.decided_at ? new Date(row.decided_at).toISOString() : undefined,
+  }
+}
+
 async function exec(db: DbExecutor, sql: string, values?: unknown[]) {
   return db.query(sql, values)
 }
@@ -624,15 +687,16 @@ async function insertSupervisorOverride(
 async function assertPeriodAllowsPosting(db: DbExecutor, date: string, confirmation: ConfirmationMetadata, action: string, entityId: string | null) {
   const result = await exec(
     db,
-    `SELECT id, name, status
+    `SELECT id, name, status, unlock_expires_at
      FROM accounting_periods
      WHERE company_id = $1 AND $2::date BETWEEN start_date AND end_date
      ORDER BY start_date DESC
      LIMIT 1`,
     [currentCompanyId(), date],
   )
-  const period = result.rows[0] as { id: string; name: string; status: "open" | "closed" } | undefined
+  const period = result.rows[0] as { id: string; name: string; status: "open" | "closed"; unlock_expires_at: string | null } | undefined
   if (period?.status !== "closed") return
+  if (period.unlock_expires_at && new Date(period.unlock_expires_at).getTime() > Date.now()) return
 
   validateSupervisorOverride(confirmation)
   await insertSupervisorOverride(db, action, "journal_entry", entityId, confirmation, {
@@ -871,6 +935,8 @@ export async function resetSystemData() {
     await exec(client, "DELETE FROM payment_vouchers WHERE company_id = $1", [currentCompanyId()])
     await exec(client, "DELETE FROM receipts WHERE company_id = $1", [currentCompanyId()])
     await exec(client, "DELETE FROM vendor_bills WHERE company_id = $1", [currentCompanyId()])
+    await exec(client, "DELETE FROM year_end_closing_runs WHERE company_id = $1", [currentCompanyId()])
+    await exec(client, "DELETE FROM period_unlock_requests WHERE company_id = $1", [currentCompanyId()])
     await exec(client, "DELETE FROM retained_earnings_closing_runs WHERE company_id = $1", [currentCompanyId()])
     await exec(client, "DELETE FROM supervisor_overrides WHERE company_id = $1", [currentCompanyId()])
     await exec(client, "DELETE FROM rule_execution_logs WHERE company_id = $1", [currentCompanyId()])
@@ -902,8 +968,11 @@ export async function insertJournalEntry(db: DbExecutor, entry: JournalEntry) {
       status,
       posted_at,
       reversed_journal_entry_id,
-      adjusted_journal_entry_id
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      adjusted_journal_entry_id,
+      system_generated,
+      generation_source,
+      locked_by_period_id
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
     [
       entry.id,
       currentCompanyId(),
@@ -914,6 +983,9 @@ export async function insertJournalEntry(db: DbExecutor, entry: JournalEntry) {
       entry.status === "draft" ? null : (entry.postedAt ?? new Date().toISOString()),
       entry.reversedJournalEntryId ?? null,
       entry.adjustedJournalEntryId ?? null,
+      entry.systemGenerated ?? false,
+      entry.generationSource ?? null,
+      entry.lockedByPeriodId ?? null,
     ],
   )
 
@@ -1287,11 +1359,11 @@ export async function listAccountingData() {
   await ensureDatabaseReady()
   await ensureDemoCompany()
 
-  const [accounts, contacts, journalEntries, journalLines, invoices, invoiceItems, vendorBills, receipts, paymentVouchers, paymentAllocations, workflowDocuments, workflowDocumentLines, stockItems, warehouses, stockBalances, stockMovements, stockMovementLines, fixedAssets, depreciationSchedules, auditLogs] = await Promise.all([
+  const [accounts, contacts, journalEntries, journalLines, invoices, invoiceItems, vendorBills, receipts, paymentVouchers, paymentAllocations, workflowDocuments, workflowDocumentLines, stockItems, warehouses, stockBalances, stockMovements, stockMovementLines, fixedAssets, depreciationSchedules, auditLogs, accountingPeriods, periodUnlockRequests] = await Promise.all([
     query<AccountRow>("SELECT id, code, name, type FROM accounts WHERE company_id = $1 ORDER BY code", [currentCompanyId()]),
     query<ContactRow>("SELECT id, name, type, email, phone, tax_id, address_line1, address_line2, address_line3, address_line4, credit_limit::text FROM contacts WHERE company_id = $1 ORDER BY name", [currentCompanyId()]),
     query<JournalEntryRow>(
-      "SELECT id, date::text, description, reference, status, posted_at::text, reversed_journal_entry_id, adjusted_journal_entry_id FROM journal_entries WHERE company_id = $1 ORDER BY date DESC, created_at DESC",
+      "SELECT id, date::text, description, reference, status, posted_at::text, reversed_journal_entry_id, adjusted_journal_entry_id, system_generated, generation_source, locked_by_period_id FROM journal_entries WHERE company_id = $1 ORDER BY date DESC, created_at DESC",
       [currentCompanyId()],
     ),
     query<JournalLineRow>("SELECT journal_entry_id, account_id, debit::text, credit::text FROM journal_lines ORDER BY created_at, id"),
@@ -1381,6 +1453,14 @@ export async function listAccountingData() {
       "SELECT id, action, entity_type, entity_id, impact_summary, reason, confirmation_phrase, metadata, created_at::text FROM audit_logs WHERE company_id = $1 ORDER BY created_at DESC LIMIT 100",
       [currentCompanyId()],
     ),
+    query<AccountingPeriodRow>(
+      "SELECT id, name, start_date::text, end_date::text, status, period_type, fiscal_year, locked_at::text, unlocked_at::text, unlock_expires_at::text FROM accounting_periods WHERE company_id = $1 ORDER BY start_date DESC",
+      [currentCompanyId()],
+    ),
+    query<PeriodUnlockRequestRow>(
+      "SELECT id, period_id, status, reason, impact_summary, allowed_until::text, rejection_reason, created_at::text, decided_at::text FROM period_unlock_requests WHERE company_id = $1 ORDER BY created_at DESC",
+      [currentCompanyId()],
+    ),
   ])
 
   return {
@@ -1400,6 +1480,8 @@ export async function listAccountingData() {
     fixedAssets: fixedAssets.rows.map(mapFixedAsset),
     depreciationSchedules: depreciationSchedules.rows.map(mapDepreciationSchedule),
     auditLogs: auditLogs.rows.map(mapAuditLog),
+    accountingPeriods: accountingPeriods.rows.map(mapAccountingPeriod),
+    periodUnlockRequests: periodUnlockRequests.rows.map(mapPeriodUnlockRequest),
   }
 }
 
@@ -1426,7 +1508,7 @@ export async function getJournalEntry(id: string) {
   await ensureDemoCompany()
 
   const entries = await query<JournalEntryRow>(
-    "SELECT id, date::text, description, reference, status, posted_at::text, reversed_journal_entry_id, adjusted_journal_entry_id FROM journal_entries WHERE id = $1 AND company_id = $2",
+    "SELECT id, date::text, description, reference, status, posted_at::text, reversed_journal_entry_id, adjusted_journal_entry_id, system_generated, generation_source, locked_by_period_id FROM journal_entries WHERE id = $1 AND company_id = $2",
     [id, currentCompanyId()],
   )
   if (!entries.rows[0]) return null
@@ -2328,6 +2410,290 @@ export async function postPeriodClose(periodStart: string, periodEnd: string, re
       periodStart,
       periodEnd,
       netIncome: preview.netIncome,
+    })
+  })
+  return listAccountingData()
+}
+
+function fiscalYearDates(fiscalYear: number) {
+  return {
+    startDate: `${fiscalYear}-01-01`,
+    endDate: `${fiscalYear}-12-31`,
+    nextStartDate: `${fiscalYear + 1}-01-01`,
+    nextEndDate: `${fiscalYear + 1}-12-31`,
+  }
+}
+
+function assertValidFiscalYear(fiscalYear: number) {
+  if (!Number.isInteger(fiscalYear) || fiscalYear < 1900 || fiscalYear > 2999) {
+    throw new Error("Fiscal year must be a valid four-digit year.")
+  }
+}
+
+async function ensureYearPeriod(db: DbExecutor, fiscalYear: number): Promise<AccountingPeriod> {
+  const dates = fiscalYearDates(fiscalYear)
+  const existing = await exec(
+    db,
+    `SELECT id, name, start_date::text, end_date::text, status, period_type, fiscal_year, locked_at::text, unlocked_at::text, unlock_expires_at::text
+     FROM accounting_periods
+     WHERE company_id = $1 AND period_type = 'year' AND fiscal_year = $2
+     LIMIT 1`,
+    [currentCompanyId(), fiscalYear],
+  )
+  if (existing.rows[0]) return mapAccountingPeriod(existing.rows[0] as AccountingPeriodRow)
+
+  const id = `period-year-${fiscalYear}-${randomUUID()}`
+  await exec(
+    db,
+    `INSERT INTO accounting_periods (id, company_id, name, start_date, end_date, status, period_type, fiscal_year)
+     VALUES ($1, $2, $3, $4, $5, 'open', 'year', $6)`,
+    [id, currentCompanyId(), `FY ${fiscalYear}`, dates.startDate, dates.endDate, fiscalYear],
+  )
+  return {
+    id,
+    name: `FY ${fiscalYear}`,
+    startDate: dates.startDate,
+    endDate: dates.endDate,
+    status: "open",
+    periodType: "year",
+    fiscalYear,
+  }
+}
+
+async function hasPostedYearEndClose(db: DbExecutor, fiscalYear: number) {
+  const existing = await exec(
+    db,
+    "SELECT id FROM year_end_closing_runs WHERE company_id = $1 AND fiscal_year = $2 AND status IN ('posted', 'reclosed') LIMIT 1",
+    [currentCompanyId(), fiscalYear],
+  )
+  return Boolean(existing.rows[0])
+}
+
+export async function previewYearEndClose(fiscalYear: number, retainedEarningsAccountId = DEFAULT_RETAINED_EARNINGS_ACCOUNT_ID): Promise<YearEndClosePreview> {
+  await ensureDatabaseReady()
+  await ensureDemoCompany()
+  assertValidFiscalYear(fiscalYear)
+  await transaction(async (client) => {
+    await ensureYearPeriod(client, fiscalYear)
+  })
+  const snapshot = await listAccountingData()
+  const preview = buildYearEndClosePreview(snapshot.accounts, snapshot.journalEntries, snapshot.depreciationSchedules, fiscalYear, retainedEarningsAccountId)
+  const alreadyClosed = snapshot.accountingPeriods.some((period) => period.periodType === "year" && period.fiscalYear === fiscalYear && period.status === "closed")
+    || snapshot.journalEntries.some((entry) => entry.reference === `YEC-${fiscalYear}`)
+  return {
+    ...preview,
+    alreadyClosed,
+    warnings: alreadyClosed ? [...preview.warnings, `FY ${fiscalYear} is already closed.`] : preview.warnings,
+  }
+}
+
+export async function postYearEndClose(fiscalYear: number, retainedEarningsAccountId: string, confirmation: ConfirmationMetadata) {
+  await ensureDatabaseReady()
+  await ensureDemoCompany()
+  assertValidFiscalYear(fiscalYear)
+  validateConfirmation(confirmation, UPDATE_CONFIRMATION_PHRASE, { requireReason: true })
+  const preview = await previewYearEndClose(fiscalYear, retainedEarningsAccountId)
+  if (!preview.trialBalanceBalanced) throw new Error("Trial balance is not balanced.")
+  if (preview.draftDepreciationCount > 0) throw new Error("Post draft depreciation schedules before year-end closing.")
+  if (preview.alreadyClosed) throw new Error(`FY ${fiscalYear} is already closed.`)
+  if (preview.warnings.length > 0) throw new Error(preview.warnings[0])
+  if (preview.openingBalanceLines.length === 0) throw new Error("Opening balance has no carryover lines.")
+
+  await transaction(async (client) => {
+    if (await hasPostedYearEndClose(client, fiscalYear)) throw new Error(`FY ${fiscalYear} is already closed.`)
+    const retained = await exec(client, "SELECT id FROM accounts WHERE id = $1 AND company_id = $2 AND type = 'equity'", [retainedEarningsAccountId, currentCompanyId()])
+    if (!retained.rows[0]) throw new Error("Retained earnings account was not found.")
+
+    const period = await ensureYearPeriod(client, fiscalYear)
+    if (period.status === "closed") throw new Error(`FY ${fiscalYear} is already closed.`)
+    const dates = fiscalYearDates(fiscalYear)
+    const nextPeriod = await ensureYearPeriod(client, fiscalYear + 1)
+    const closeId = `close-year-${randomUUID()}`
+    const closingEntry: JournalEntry = {
+      id: `je-yec-${randomUUID()}`,
+      date: dates.endDate,
+      description: `Year-end close FY ${fiscalYear}`,
+      reference: `YEC-${fiscalYear}`,
+      status: "posted",
+      systemGenerated: true,
+      generationSource: "year_end_closing",
+      lockedByPeriodId: period.id,
+      lines: preview.lines,
+    }
+    const openingEntry: JournalEntry = {
+      id: `je-open-${randomUUID()}`,
+      date: dates.nextStartDate,
+      description: `Opening balance FY ${fiscalYear + 1}`,
+      reference: `OPEN-${fiscalYear + 1}`,
+      status: "posted",
+      systemGenerated: true,
+      generationSource: "opening_balance_carryover",
+      lockedByPeriodId: nextPeriod.id,
+      lines: preview.openingBalanceLines,
+    }
+    await insertJournalEntry(client, closingEntry)
+    await insertJournalEntry(client, openingEntry)
+    await exec(
+      client,
+      `UPDATE accounting_periods
+       SET status = 'closed',
+           locked_at = NOW(),
+           locked_by = $1,
+           lock_reason = $2,
+           next_period_id = $3,
+           updated_at = NOW()
+       WHERE id = $4 AND company_id = $5`,
+      [currentUserId(), confirmation.reason?.trim() || "Year-end close", nextPeriod.id, period.id, currentCompanyId()],
+    )
+    await exec(
+      client,
+      "UPDATE accounting_periods SET prior_period_id = $1, updated_at = NOW() WHERE id = $2 AND company_id = $3",
+      [period.id, nextPeriod.id, currentCompanyId()],
+    )
+    await exec(
+      client,
+      `INSERT INTO year_end_closing_runs (
+        id,
+        company_id,
+        fiscal_year,
+        period_id,
+        next_period_id,
+        status,
+        period_start,
+        period_end,
+        next_period_start,
+        next_period_end,
+        revenue_total,
+        expense_total,
+        net_income,
+        closing_journal_entry_id,
+        opening_journal_entry_id,
+        trial_balance_snapshot,
+        closing_balance_snapshot,
+        opening_balance_snapshot,
+        warnings,
+        created_by,
+        posted_by,
+        posted_at
+      ) VALUES ($1, $2, $3, $4, $5, 'posted', $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb, $16::jsonb, $17::jsonb, $18::jsonb, $19, $20, NOW())`,
+      [
+        closeId,
+        currentCompanyId(),
+        fiscalYear,
+        period.id,
+        nextPeriod.id,
+        dates.startDate,
+        dates.endDate,
+        dates.nextStartDate,
+        dates.nextEndDate,
+        preview.revenueTotal,
+        preview.expenseTotal,
+        preview.netIncome,
+        closingEntry.id,
+        openingEntry.id,
+        JSON.stringify({ lines: preview.lines, balanced: preview.trialBalanceBalanced }),
+        JSON.stringify(preview.closingBalance),
+        JSON.stringify(preview.openingBalanceLines),
+        JSON.stringify(preview.warnings),
+        currentUserId(),
+        currentUserId(),
+      ],
+    )
+    await insertAuditLog(client, "year_end_close.post", "year_end_closing_run", closeId, confirmation, {
+      fiscalYear,
+      periodId: period.id,
+      nextPeriodId: nextPeriod.id,
+      closingJournalEntryId: closingEntry.id,
+      openingJournalEntryId: openingEntry.id,
+      netIncome: preview.netIncome,
+    })
+  })
+
+  return listAccountingData()
+}
+
+export async function requestPeriodUnlock(periodId: string, reason: string, impactSummary: string) {
+  await ensureDatabaseReady()
+  await ensureDemoCompany()
+  if (!reason.trim()) throw new Error("Unlock reason is required.")
+  if (!impactSummary.trim()) throw new Error("Unlock impact summary is required.")
+  const period = await query<AccountingPeriodRow>(
+    `SELECT id, name, start_date::text, end_date::text, status, period_type, fiscal_year, locked_at::text, unlocked_at::text, unlock_expires_at::text
+     FROM accounting_periods WHERE id = $1 AND company_id = $2`,
+    [periodId, currentCompanyId()],
+  )
+  if (!period.rows[0]) throw new Error("Accounting period was not found.")
+  if (period.rows[0].status !== "closed") throw new Error("Only closed periods can be unlocked.")
+  const id = `unlock-${randomUUID()}`
+  await transaction(async (client) => {
+    await exec(
+      client,
+      `INSERT INTO period_unlock_requests (id, company_id, period_id, requested_by, status, reason, impact_summary)
+       VALUES ($1, $2, $3, $4, 'pending', $5, $6)`,
+      [id, currentCompanyId(), periodId, currentUserId(), reason.trim(), impactSummary.trim()],
+    )
+  })
+  return listAccountingData()
+}
+
+export async function approvePeriodUnlock(requestId: string, allowedUntil: string, confirmation: ConfirmationMetadata) {
+  await ensureDatabaseReady()
+  validateConfirmation(confirmation, UPDATE_CONFIRMATION_PHRASE, { requireReason: true })
+  if (Number.isNaN(Date.parse(allowedUntil))) throw new Error("Allowed-until timestamp is required.")
+  await transaction(async (client) => {
+    const request = await exec(
+      client,
+      "SELECT id, period_id, status FROM period_unlock_requests WHERE id = $1 AND company_id = $2",
+      [requestId, currentCompanyId()],
+    )
+    const row = request.rows[0] as { id: string; period_id: string; status: PeriodUnlockRequest["status"] } | undefined
+    if (!row) throw new Error("Unlock request was not found.")
+    if (row.status !== "pending") throw new Error("Only pending unlock requests can be approved.")
+    await exec(
+      client,
+      `UPDATE period_unlock_requests
+       SET status = 'approved', approved_by = $1, allowed_until = $2, decided_at = NOW()
+       WHERE id = $3 AND company_id = $4`,
+      [currentUserId(), allowedUntil, requestId, currentCompanyId()],
+    )
+    await exec(
+      client,
+      `UPDATE accounting_periods
+       SET unlocked_at = NOW(), unlocked_by = $1, unlock_expires_at = $2, unlock_reason = $3, updated_at = NOW()
+       WHERE id = $4 AND company_id = $5`,
+      [currentUserId(), allowedUntil, confirmation.reason?.trim() || "Management-approved unlock", row.period_id, currentCompanyId()],
+    )
+    await insertAuditLog(client, "period_unlock.approve", "period_unlock_request", requestId, confirmation, {
+      periodId: row.period_id,
+      allowedUntil,
+    })
+  })
+  return listAccountingData()
+}
+
+export async function rejectPeriodUnlock(requestId: string, rejectionReason: string, confirmation: ConfirmationMetadata) {
+  await ensureDatabaseReady()
+  validateConfirmation(confirmation, UPDATE_CONFIRMATION_PHRASE, { requireReason: true })
+  if (!rejectionReason.trim()) throw new Error("Rejection reason is required.")
+  await transaction(async (client) => {
+    const request = await exec(
+      client,
+      "SELECT id, period_id, status FROM period_unlock_requests WHERE id = $1 AND company_id = $2",
+      [requestId, currentCompanyId()],
+    )
+    const row = request.rows[0] as { id: string; period_id: string; status: PeriodUnlockRequest["status"] } | undefined
+    if (!row) throw new Error("Unlock request was not found.")
+    if (row.status !== "pending") throw new Error("Only pending unlock requests can be rejected.")
+    await exec(
+      client,
+      `UPDATE period_unlock_requests
+       SET status = 'rejected', approved_by = $1, rejection_reason = $2, decided_at = NOW()
+       WHERE id = $3 AND company_id = $4`,
+      [currentUserId(), rejectionReason.trim(), requestId, currentCompanyId()],
+    )
+    await insertAuditLog(client, "period_unlock.reject", "period_unlock_request", requestId, confirmation, {
+      periodId: row.period_id,
+      rejectionReason: rejectionReason.trim(),
     })
   })
   return listAccountingData()

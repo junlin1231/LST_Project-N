@@ -32,6 +32,7 @@ type DocumentActionResponse = OcrDocumentDetail | {
   journalEntries?: Array<{ id: string }>
   splitDocuments?: OcrDocumentDetail[]
   skippedPostedDocumentCount?: number
+  failedSplitDocumentCount?: number
 }
 
 const DEFAULT_TAX_RATE = 0.06
@@ -300,6 +301,7 @@ export function DocumentsView() {
       const detail = "detail" in body && body.detail ? body.detail : body as OcrDocumentDetail
       const splitDocuments = "splitDocuments" in body ? body.splitDocuments : undefined
       const skippedPostedDocumentCount = "skippedPostedDocumentCount" in body ? body.skippedPostedDocumentCount ?? 0 : 0
+      const failedSplitDocumentCount = "failedSplitDocumentCount" in body ? body.failedSplitDocumentCount ?? 0 : 0
       const displayedDetail = splitDocuments?.[0] ?? detail
       if (isOcrProcess) {
         setSplitTransactions(splitDocuments?.map(splitTransactionSummary) ?? [])
@@ -316,13 +318,15 @@ export function DocumentsView() {
         await refreshAccountingData()
       }
       const message = splitDocuments?.length
-        ? `${splitDocuments.length} transactions detected, separated, and scanned individually.${skippedPostedDocumentCount ? ` ${skippedPostedDocumentCount} posted transaction${skippedPostedDocumentCount === 1 ? " was" : "s were"} left unchanged.` : ""} Showing transaction 1.`
+        ? failedSplitDocumentCount
+          ? `${splitDocuments.length} transactions detected and separated, but ${failedSplitDocumentCount} OCR scan${failedSplitDocumentCount === 1 ? "" : "s"} failed. Open each failed transaction and re-scan after the OCR endpoint is available.`
+          : `${splitDocuments.length} transactions detected, separated, and scanned individually.${skippedPostedDocumentCount ? ` ${skippedPostedDocumentCount} posted transaction${skippedPostedDocumentCount === 1 ? " was" : "s were"} left unchanged.` : ""} Showing transaction 1.`
         : path === "post"
           ? "journalEntries" in body && body.journalEntries?.length
             ? `Posted ${body.journalEntries.length} journal entries.`
             : `Posted journal entry ${"journalEntry" in body ? body.journalEntry?.id ?? "" : ""}`.trim()
           : "Document updated."
-      setNotice({ type: "success", message })
+      setNotice({ type: failedSplitDocumentCount ? "error" : "success", message })
     } catch (error) {
       setNotice({ type: "error", message: error instanceof Error ? error.message : "Action failed." })
     } finally {
@@ -683,7 +687,9 @@ export function DocumentsView() {
                     <Button variant="outline" onClick={() => window.open(`/api/documents/${selected.id}?action=file`, "_blank", "noreferrer")}>
                       Open Original
                     </Button>
-                    {selected.extraction?.rawText ? (
+                    {selected.extraction?.errorMessage ? (
+                      <div className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">{selected.extraction.errorMessage}</div>
+                    ) : selected.extraction?.rawText ? (
                       <pre className="max-h-56 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-muted/30 p-3 text-xs">{selected.extraction.rawText}</pre>
                     ) : null}
                   </TabsContent>
@@ -751,26 +757,26 @@ export function DocumentsView() {
                       <Summary label="Money Out" value={bankMoneyOut} />
                     </div>
                     <div className="overflow-hidden rounded-md border border-border">
-                      <div className="hidden grid-cols-[7rem_minmax(14rem,1fr)_9rem_8rem_8rem_8rem] gap-2 border-b border-border bg-muted/40 px-3 py-2 text-xs font-medium text-muted-foreground lg:grid">
-                        <span>Date</span>
-                        <span>Description</span>
-                        <span>Reference</span>
-                        <span className="text-right">Money In</span>
-                        <span className="text-right">Money Out</span>
-                        <span className="text-right">Balance</span>
-                      </div>
-                      {bankTransactions.length === 0 ? (
-                        <div className="p-4 text-sm text-muted-foreground">No bank statement rows captured.</div>
-                      ) : bankTransactions.map((transaction, index) => (
-                        <div key={`${transaction.date}-${index}`} className="grid gap-2 border-b border-border p-3 text-sm last:border-b-0 lg:grid-cols-[7rem_minmax(14rem,1fr)_9rem_8rem_8rem_8rem] lg:items-center">
-                          <span className="font-medium">{transaction.date}</span>
-                          <span className="min-w-0 break-words">{transaction.description}</span>
-                          <span className="min-w-0 break-words text-muted-foreground">{transaction.reference || "-"}</span>
-                          <span className="text-right"><Amount value={transaction.moneyIn} /></span>
-                          <span className="text-right"><Amount value={transaction.moneyOut} /></span>
-                          <span className="text-right text-muted-foreground">{transaction.balance === undefined ? "-" : <Amount value={transaction.balance} />}</span>
+                      <div className="max-h-[30rem] overflow-y-auto">
+                        <div className="sticky top-0 z-10 hidden grid-cols-[7rem_minmax(14rem,1fr)_9rem_8rem_8rem] gap-2 border-b border-border bg-muted px-3 py-2 text-xs font-medium text-muted-foreground lg:grid">
+                          <span>Date</span>
+                          <span>Description</span>
+                          <span>Reference</span>
+                          <span className="text-right">Money In</span>
+                          <span className="text-right">Money Out</span>
                         </div>
-                      ))}
+                        {bankTransactions.length === 0 ? (
+                          <div className="p-4 text-sm text-muted-foreground">No bank statement rows captured.</div>
+                        ) : bankTransactions.map((transaction, index) => (
+                          <div key={`${transaction.date}-${index}`} className="grid gap-2 border-b border-border p-3 text-sm last:border-b-0 lg:grid-cols-[7rem_minmax(14rem,1fr)_9rem_8rem_8rem] lg:items-center">
+                            <span className="font-medium">{transaction.date}</span>
+                            <span className="min-w-0 break-words">{transaction.description}</span>
+                            <span className="min-w-0 break-words text-muted-foreground">{transaction.reference || "-"}</span>
+                            <span className="text-right"><Amount value={transaction.moneyIn} /></span>
+                            <span className="text-right"><Amount value={transaction.moneyOut} /></span>
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   </TabsContent>
 

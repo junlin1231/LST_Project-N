@@ -3,7 +3,7 @@ import "server-only"
 import type { DocumentCategory, NormalizedDocumentFields } from "@/lib/accounting/document-types"
 import { DOCUMENT_CATEGORIES } from "@/lib/accounting/document-types"
 import type { JournalLine } from "@/lib/accounting/types"
-import { getActiveRuleConfig } from "./accounting-rule-service"
+import { accountIdForCode, getActiveRuleConfig } from "./accounting-rule-service"
 import { chatCompletionsUrl, fetchAiJson } from "./ai-endpoint"
 import { getServerEnv } from "./env"
 import { query } from "./db"
@@ -233,12 +233,12 @@ function refineBankTransferCategory(decision: CategoryDecision, rawText: string,
   return decision
 }
 
-function firstKeywordMatch(text: string, groups: Array<{ accountId: string; keywords: string[] }>) {
+function firstKeywordMatch(text: string, groups: Array<{ accountCode: string; keywords: string[] }>) {
   const lower = text.toLowerCase()
-  return groups.find((group) => group.keywords.some((keyword) => lower.includes(keyword)))?.accountId
+  return groups.find((group) => group.keywords.some((keyword) => lower.includes(keyword)))?.accountCode
 }
 
-function expenseAccountFor(category: DocumentCategory, fields: NormalizedDocumentFields, rawText: string, fallbackAccountId: string) {
+async function expenseAccountFor(category: DocumentCategory, fields: NormalizedDocumentFields, rawText: string, fallbackAccountId: string) {
   const text = [
     rawText,
     fields.vendorName,
@@ -259,18 +259,19 @@ function expenseAccountFor(category: DocumentCategory, fields: NormalizedDocumen
     delivery_document: "5950",
   }
   const byCategory = categoryAccount[category]
-  if (byCategory) return byCategory
+  if (byCategory) return accountIdForCode(byCategory, fallbackAccountId)
 
-  return firstKeywordMatch(text, [
-    { accountId: "5200", keywords: ["electric", "electricity", "utility", "utilities", "water bill", "air selangor", "tnb", "telekom", "internet", "wifi"] },
-    { accountId: "5800", keywords: ["restaurant", "dining", "dinner", "lunch", "meal", "cafe", "coffee", "food", "entertainment"] },
-    { accountId: "5950", keywords: ["petrol", "fuel", "diesel", "parking", "toll", "grab", "taxi", "transport", "delivery", "courier", "logistic"] },
-    { accountId: "5500", keywords: ["software", "subscription", "saas", "cloud", "hosting", "domain"] },
-    { accountId: "5400", keywords: ["marketing", "advertising", "facebook ads", "google ads", "promotion"] },
-    { accountId: "5000", keywords: ["rent", "rental", "lease"] },
-    { accountId: "5100", keywords: ["salary", "wage", "payroll"] },
-    { accountId: "5300", keywords: ["stationery", "office supply", "office supplies", "printer", "paper", "ink"] },
-  ]) ?? fallbackAccountId
+  const code = firstKeywordMatch(text, [
+    { accountCode: "5200", keywords: ["electric", "electricity", "utility", "utilities", "water bill", "air selangor", "tnb", "telekom", "internet", "wifi"] },
+    { accountCode: "5800", keywords: ["restaurant", "dining", "dinner", "lunch", "meal", "cafe", "coffee", "food", "entertainment"] },
+    { accountCode: "5950", keywords: ["petrol", "fuel", "diesel", "parking", "toll", "grab", "taxi", "transport", "delivery", "courier", "logistic"] },
+    { accountCode: "5500", keywords: ["software", "subscription", "saas", "cloud", "hosting", "domain"] },
+    { accountCode: "5400", keywords: ["marketing", "advertising", "facebook ads", "google ads", "promotion"] },
+    { accountCode: "5000", keywords: ["rent", "rental", "lease"] },
+    { accountCode: "5100", keywords: ["salary", "wage", "payroll"] },
+    { accountCode: "5300", keywords: ["stationery", "office supply", "office supplies", "printer", "paper", "ink"] },
+  ])
+  return code ? accountIdForCode(code, fallbackAccountId) : fallbackAccountId
 }
 
 async function categorizeWithGemmaEndpoint(input: {
@@ -345,7 +346,7 @@ export class MockCategorizationAdapter implements CategorizationAdapter {
     }) ?? inferCategory(`${input.rawText}\n${fields.documentNumber ?? ""}\n${fields.lineItems.map((line) => line.description).join(" ")}`, ownEntityNames), input.rawText, ownEntityNames)
     const category = fields.bankTransactions?.length ? "bank_document" : inferred.category
     const expenseDebit = Number(Math.max(0, fields.totalAmount - fields.taxAmount).toFixed(2))
-    const suggestedJournalLines: JournalLine[] = buildSuggestedJournalLines(category, fields, config, expenseDebit, input.rawText)
+    const suggestedJournalLines: JournalLine[] = await buildSuggestedJournalLines(category, fields, config, expenseDebit, input.rawText)
 
     return {
       ...inferred,
@@ -362,7 +363,7 @@ export class MockCategorizationAdapter implements CategorizationAdapter {
 
 export const categorizationAdapter = new MockCategorizationAdapter()
 
-function buildSuggestedJournalLines(category: DocumentCategory, fields: NormalizedDocumentFields, config: Awaited<ReturnType<typeof getActiveRuleConfig>>, expenseDebit: number, rawText: string) {
+async function buildSuggestedJournalLines(category: DocumentCategory, fields: NormalizedDocumentFields, config: Awaited<ReturnType<typeof getActiveRuleConfig>>, expenseDebit: number, rawText: string) {
   if (category === "receipt_income" || category === "sales_invoice") {
     return [
       { accountId: config.cashAccountId, debit: fields.totalAmount, credit: 0 },
@@ -376,7 +377,7 @@ function buildSuggestedJournalLines(category: DocumentCategory, fields: Normaliz
   }
 
   const payableAccountId = fields.paymentMethod ? config.cashAccountId : config.accountsPayableAccountId
-  const expenseAccountId = expenseAccountFor(category, fields, rawText, config.expenseAccountId)
+  const expenseAccountId = await expenseAccountFor(category, fields, rawText, config.expenseAccountId)
   return [
     { accountId: expenseAccountId, debit: expenseDebit, credit: 0 },
     { accountId: config.taxPayableAccountId, debit: fields.taxAmount, credit: 0 },

@@ -1,0 +1,9 @@
+{% extends "access/base.html" %}
+{% block title %}Accounting Database Required{% endblock %}
+{% block content %}
+<section class="panel">
+  <h1>Accounting database required</h1>
+  <p class="muted">{{ message }}</p>
+  <a class="link" href="{% url 'admin_dashboard' %}">Back to dashboard</a>
+</section>
+{% endblock %}

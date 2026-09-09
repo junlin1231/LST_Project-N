@@ -111,6 +111,12 @@ async function extractLocalText(input: { filePath: string; mimeType: string }) {
     return fs.readFile(input.filePath, "utf8").catch(() => "")
   }
   if (input.mimeType === "application/pdf") {
+    const popplerText = await execFileAsync("pdftotext", ["-layout", input.filePath, "-"], {
+      timeout: 60_000,
+      maxBuffer: 8 * 1024 * 1024,
+    }).then(({ stdout }) => stdout.trim()).catch(() => "")
+    if (popplerText.length > 0) return popplerText
+
     const buffer = await fs.readFile(input.filePath).catch(() => Buffer.alloc(0))
     return extractReadablePdfText(buffer)
   }
@@ -150,12 +156,13 @@ async function renderPdfPages(input: { filePath: string; maxPages?: number }) {
 
 function buildFallbackFields(input: { rawText: string; originalFilename: string; aiWarning?: string }) {
   const baseName = path.basename(input.originalFilename, path.extname(input.originalFilename))
+  const bankTransactions = inferBankTransactionsFromText(input.rawText)
   const totalAmount = inferAmount(input.rawText)
   const subtotal = totalAmount > 0 ? Number((totalAmount / 1.06).toFixed(2)) : 0
   const taxAmount = totalAmount > 0 ? Number((totalAmount - subtotal).toFixed(2)) : 0
   const lower = input.rawText.toLowerCase()
   const description = lower.includes("petrol") ? "Petrol" : lower.includes("entertain") ? "Entertainment" : "Document line"
-  const warnings = totalAmount > 0
+  const warnings = totalAmount > 0 || bankTransactions?.length
     ? []
     : ["Amount was not detected locally. Configure the Gemma endpoint or enter totals before posting."]
   if (input.aiWarning) warnings.unshift(input.aiWarning)
@@ -170,9 +177,12 @@ function buildFallbackFields(input: { rawText: string; originalFilename: string;
     taxAmount,
     totalAmount,
     paymentMethod: "",
+    bankTransactions,
     lineItems: totalAmount > 0
       ? [{ description, quantity: 1, unitPrice: subtotal, taxRate: 0.06, taxAmount, lineTotal: totalAmount }]
-      : [{ description, quantity: 1, unitPrice: 0, taxRate: 0, taxAmount: 0, lineTotal: 0 }],
+      : bankTransactions?.length
+        ? []
+        : [{ description, quantity: 1, unitPrice: 0, taxRate: 0, taxAmount: 0, lineTotal: 0 }],
     warnings,
   }
 }
@@ -318,49 +328,94 @@ function statementDateValue(value: string) {
   return month > 0 ? `${named[3]}-${String(month).padStart(2, "0")}-${named[1].padStart(2, "0")}` : ""
 }
 
+function statementDateWithDefaultYear(value: string, fallbackYear: string) {
+  const fullDate = statementDateValue(value)
+  if (fullDate) return fullDate
+  const partial = value.trim().match(/^(\d{1,2})[/-](\d{1,2})$/)
+  return partial && fallbackYear ? `${fallbackYear}-${partial[2].padStart(2, "0")}-${partial[1].padStart(2, "0")}` : ""
+}
+
 function moneyValue(value: string) {
   const normalized = value.replace(/,/g, "").replace(/^RM\s*/i, "")
   const number = Number.parseFloat(normalized)
   return Number.isFinite(number) ? number : 0
 }
 
+function statementYearFromText(rawText: string) {
+  const statementDate = rawText.match(/Statement Date\s+(\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4})/i)
+    ?? rawText.match(/Tarikh Penyata[\s\S]{0,80}?(\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4})/i)
+  const parsed = statementDate?.[1] ? statementDateValue(statementDate[1]) : ""
+  return parsed.slice(0, 4) || new Date().getFullYear().toString()
+}
+
+function isBalanceLine(value: string) {
+  return /\b(balance\s+(?:from last statement|b\/f|c\/f)|closing balance)\b/i.test(value)
+}
+
+function directionFromTransaction(description: string, amountColumn: "left" | "right") {
+  const lower = description.toLowerCase()
+  if (/\b(?:dep|cr|credit)\b/.test(lower) || lower.includes("trsf cr")) return "in"
+  if (/\b(?:dr|debit|giro pymt|jompay|fpx)\b/.test(lower) || lower.includes("trsf dr") || lower.includes("fund dr")) return "out"
+  return amountColumn === "right" ? "in" : "out"
+}
+
 function inferBankTransactionsFromText(rawText: string): BankStatementTransaction[] | undefined {
   const lower = rawText.toLowerCase()
   const looksLikeStatement = lower.includes("bank statement")
+    || lower.includes("statement of account")
+    || lower.includes("penyata akaun")
     || lower.includes("account details and transaction history")
+    || (lower.includes("debit") && lower.includes("credit") && lower.includes("balance"))
     || (lower.includes("money in") && lower.includes("money out") && lower.includes("balance"))
   if (!looksLikeStatement) return undefined
 
-  const transactions = rawText.split(/\r?\n/).flatMap((line) => {
-    const normalizedLine = line.replace(/\s+/g, " ").trim()
-    const dateMatch = normalizedLine.match(/\b(\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b/)
-    if (!dateMatch) return []
-    const date = statementDateValue(dateMatch[1])
-    if (!date) return []
+  const fallbackYear = statementYearFromText(rawText)
+  let currentDate = ""
+  let current: BankStatementTransaction | null = null
+  const transactions: BankStatementTransaction[] = []
 
-    const amountMatches = [...normalizedLine.matchAll(/\b(?:RM\s*)?\d{1,3}(?:,\d{3})*(?:\.\d{2})\b/g)]
-    if (amountMatches.length < 2) return []
-    const amounts = amountMatches.map((match) => moneyValue(match[0]))
-    const balance = amounts.at(-1)
-    const firstAmount = amounts.at(-3) ?? 0
-    const secondAmount = amounts.at(-2) ?? amounts.at(0) ?? 0
-    const beforeFirstAmount = amountMatches[0]?.index ?? normalizedLine.length
-    const description = normalizedLine.slice((dateMatch.index ?? 0) + dateMatch[0].length, beforeFirstAmount).replace(/\s{2,}/g, " ").trim()
-    if (!description || balance === undefined || !Number.isFinite(balance)) return []
+  function pushCurrent() {
+    if (current && !isBalanceLine(current.description) && (current.moneyIn > 0 || current.moneyOut > 0)) {
+      current.description = current.description.replace(/\s+/g, " ").trim()
+      transactions.push(current)
+    }
+    current = null
+  }
 
-    const descriptionLower = description.toLowerCase()
-    const likelyMoneyIn = descriptionLower.includes("deposit") || descriptionLower.includes("credit") || descriptionLower.includes("interest") || descriptionLower.includes("cash deposit")
-    const moneyIn = amounts.length >= 3 ? firstAmount : likelyMoneyIn ? secondAmount : 0
-    const moneyOut = amounts.length >= 3 ? secondAmount : likelyMoneyIn ? 0 : secondAmount
-    if (moneyIn <= 0 && moneyOut <= 0) return []
-    return [{
-      date,
-      description,
-      moneyIn: Number(moneyIn.toFixed(2)),
-      moneyOut: Number(moneyOut.toFixed(2)),
-      balance: Number(balance.toFixed(2)),
-    }]
-  })
+  for (const line of rawText.split(/\r?\n/)) {
+    const dateMatch = line.match(/^\s*(\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?)\s+(.*)$/)
+    const lineDate = dateMatch ? statementDateWithDefaultYear(dateMatch[1], fallbackYear) : ""
+    if (lineDate) currentDate = lineDate
+
+    const content = (dateMatch?.[2] ?? line).trim()
+    if (!content || /^(date|transaction|debit|credit|balance|tarikh|urus niaga)$/i.test(content)) continue
+
+    const amountMatches = [...line.matchAll(/\b(?:RM\s*)?\d{1,3}(?:,\d{3})*(?:\.\d{2})\b/g)]
+    if (amountMatches.length >= 2 && currentDate) {
+      pushCurrent()
+      const transactionAmountMatch = amountMatches.at(-2)
+      const balanceMatch = amountMatches.at(-1)
+      const amount = moneyValue(transactionAmountMatch?.[0] ?? "0")
+      const balance = moneyValue(balanceMatch?.[0] ?? "0")
+      const beforeAmount = transactionAmountMatch?.index ?? line.length
+      const description = line.slice(dateMatch ? (dateMatch.index ?? 0) + dateMatch[1].length : 0, beforeAmount).replace(/\s+/g, " ").trim()
+      const amountColumn = beforeAmount > 100 ? "right" : "left"
+      const direction = directionFromTransaction(description, amountColumn)
+      current = {
+        date: currentDate,
+        description,
+        moneyIn: direction === "in" ? Number(amount.toFixed(2)) : 0,
+        moneyOut: direction === "out" ? Number(amount.toFixed(2)) : 0,
+        balance: Number(balance.toFixed(2)),
+      }
+      continue
+    }
+
+    if (current && !isBalanceLine(content) && !dateMatch && !amountMatches.length) {
+      current.description = `${current.description} ${content}`.trim()
+    }
+  }
+  pushCurrent()
 
   return transactions.length > 0 ? transactions : undefined
 }
@@ -550,6 +605,17 @@ export class MockOcrAdapter implements OcrAdapter {
       ? "AI OCR is not configured. Add URL, LLM_MODEL, LLM_PROVIDER, and BEARER_TOKEN to accounting system/.env.local, then restart the dev server."
       : undefined
     const pdfAnalysis = await analyzeLocalPdf(input)
+    const fileText = await extractLocalText(input)
+    if (input.mimeType === "application/pdf" && fileText.trim().length > 80) {
+      return {
+        rawText: fileText.trim(),
+        confidence: 0.88,
+        pageCount: pdfAnalysis?.pageCount ?? 1,
+        engine: "local-pdf-text",
+        fields: buildFallbackFields({ rawText: fileText.trim(), originalFilename: input.originalFilename }),
+      }
+    }
+
     const aiResult = await extractWithGemmaEndpoint({ ...input, pdfAnalysis }).catch((error) => {
       aiWarning = error instanceof Error ? `AI OCR failed: ${error.message}` : "AI OCR failed."
       console.error(error)
@@ -558,7 +624,6 @@ export class MockOcrAdapter implements OcrAdapter {
     if (aiResult) return aiResult
 
     const baseName = path.basename(input.originalFilename, path.extname(input.originalFilename))
-    const fileText = await extractLocalText(input)
     if (input.mimeType === "application/pdf" && pdfAnalysis?.looksScanned && fileText.trim().length < 20) {
       const scannerNote = pdfAnalysis.hasCcittImages
         ? "This PDF is a scanned black-and-white image PDF. PDF page rendering was attempted; if OCR still failed, check that Poppler is installed in the running server container and the Gemma endpoint is reachable."

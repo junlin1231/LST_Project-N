@@ -41,6 +41,9 @@ export interface JournalEntry {
   postedAt?: string
   reversedJournalEntryId?: string
   adjustedJournalEntryId?: string
+  systemGenerated?: boolean
+  generationSource?: "year_end_closing" | "opening_balance_carryover" | "period_reclose_adjustment" | string
+  lockedByPeriodId?: string
   lines: JournalLine[]
 }
 
@@ -340,6 +343,48 @@ export interface PeriodClosePreview {
   lines: JournalLine[]
 }
 
+export interface ClosingBalanceLine {
+  accountId: string
+  code: string
+  name: string
+  type: AccountType
+  amount: number
+}
+
+export interface YearEndClosePreview extends PeriodClosePreview {
+  fiscalYear: number
+  nextPeriod: ReportingPeriod
+  retainedEarningsAccountId: string
+  closingBalance: ClosingBalanceLine[]
+  openingBalanceLines: JournalLine[]
+  warnings: string[]
+}
+
+export interface AccountingPeriod {
+  id: string
+  name: string
+  startDate: string
+  endDate: string
+  status: "open" | "closed"
+  periodType?: "month" | "quarter" | "year"
+  fiscalYear?: number
+  lockedAt?: string
+  unlockedAt?: string
+  unlockExpiresAt?: string
+}
+
+export interface PeriodUnlockRequest {
+  id: string
+  periodId: string
+  status: "pending" | "approved" | "rejected" | "expired" | "used" | "cancelled"
+  reason: string
+  impactSummary: string
+  allowedUntil?: string
+  rejectionReason?: string
+  createdAt: string
+  decidedAt?: string
+}
+
 export interface AccountingSnapshot {
   accounts: Account[]
   contacts: Contact[]
@@ -357,6 +402,8 @@ export interface AccountingSnapshot {
   fixedAssets: FixedAsset[]
   depreciationSchedules: DepreciationSchedule[]
   auditLogs: AuditLog[]
+  accountingPeriods: AccountingPeriod[]
+  periodUnlockRequests: PeriodUnlockRequest[]
 }
 
 export interface AuditLog {

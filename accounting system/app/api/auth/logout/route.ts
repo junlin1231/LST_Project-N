@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 
 const ACCESS_COOKIE_NAME = process.env.ACCESS_COOKIE_NAME || "lst_access_token"
 const DJANGO_LOGIN_URL = process.env.DJANGO_LOGIN_URL || "http://localhost:8000/login/"
+const LEGACY_SESSION_COOKIE_NAME = "lst_user_id"
 
 export async function GET(request: NextRequest) {
   const loginUrl = new URL(DJANGO_LOGIN_URL)
@@ -11,6 +12,7 @@ export async function GET(request: NextRequest) {
   loginUrl.searchParams.set("next", `${protocol}://${host}/`)
   const response = NextResponse.redirect(loginUrl)
   response.cookies.delete(ACCESS_COOKIE_NAME)
+  response.cookies.delete(LEGACY_SESSION_COOKIE_NAME)
   return response
 }
 

@@ -415,12 +415,6 @@ function looksLikeBankStatementOcr(ocr: OcrResult, originalFilename: string) {
     || (text.includes("money in") && text.includes("money out") && text.includes("balance"))
 }
 
-function looksLikeBankStatementFilename(filename: string) {
-  return /\b(bank|statement|cimb|maybank|rhb|ambank|ocbc|uob)\b/i.test(filename)
-    || /public[-_\s]*bank/i.test(filename)
-    || /hong[-_\s]*leong/i.test(filename)
-}
-
 async function storeOcrDraftForDocument(row: DocumentRow, ocr: OcrResult) {
   const category = await categorizationAdapter.categorize({ rawText: ocr.rawText, extractedFields: ocr.fields })
   const warnings = needsReview(ocr.confidence, category.confidence, category.category, category.normalizedFields, category.suggestedJournalLines)
@@ -501,7 +495,7 @@ async function childDocumentRows(parentDocumentId: string) {
 async function deleteUnpostedChildDocuments(parentDocumentId: string, children: ChildDocumentRow[]) {
   const posted = children.filter((child) => child.processing_status === "posted" || child.review_status === "posted")
   if (posted.length > 0) {
-    throw new Error("This bank statement has posted split transactions. Reverse or review those entries before rescanning it as one statement.")
+    throw new Error("This PDF has posted split transactions. Reverse or review those entries before rescanning it as one document.")
   }
 
   await transaction(async (client) => {
@@ -550,6 +544,7 @@ export interface DocumentProcessResult {
   detail: OcrDocumentDetail
   splitDocuments?: OcrDocumentDetail[]
   skippedPostedDocumentCount?: number
+  failedSplitDocumentCount?: number
 }
 
 export async function processDocument(id: string): Promise<DocumentProcessResult> {
@@ -568,9 +563,9 @@ export async function processDocument(id: string): Promise<DocumentProcessResult
   const baseName = path.basename(row.original_filename, path.extname(row.original_filename)) || "document"
   const filePath = resolveStoredDocumentPath(row.storage_path)
   let children = await childDocumentRows(id)
-  if (row.mime_type === "application/pdf" && looksLikeBankStatementFilename(row.original_filename)) {
+  if (row.mime_type === "application/pdf") {
     const preflightOcr = await ocrAdapter.extract({ filePath, mimeType: row.mime_type, originalFilename: row.original_filename })
-    if (looksLikeBankStatementOcr(preflightOcr, row.original_filename)) {
+    if (preflightOcr.engine === "local-pdf-text" || looksLikeBankStatementOcr(preflightOcr, row.original_filename)) {
       if (children.length > 0) {
         await deleteUnpostedChildDocuments(id, children)
       }
@@ -654,10 +649,11 @@ export async function processDocument(id: string): Promise<DocumentProcessResult
   // A parent rescan reuses its existing split files and creates fresh OCR drafts for each transaction.
   const childrenToRescan = children.filter((child) => child.processing_status !== "posted" && child.review_status !== "posted")
   const skippedPostedDocumentCount = children.length - childrenToRescan.length
-  await Promise.allSettled(childrenToRescan.map((child) => processOneDocument(child.id)))
+  const scanResults = await Promise.allSettled(childrenToRescan.map((child) => processOneDocument(child.id)))
+  const failedSplitDocumentCount = scanResults.filter((result) => result.status === "rejected").length
   await recordSplitParent(id, children.length, row.mime_type === "application/pdf" ? "pdf_pages" : "image_regions")
   const splitDocuments = await Promise.all(children.map((child) => getDocumentDetail(child.id)))
-  return { detail: await getDocumentDetail(id), splitDocuments, skippedPostedDocumentCount }
+  return { detail: await getDocumentDetail(id), splitDocuments, skippedPostedDocumentCount, failedSplitDocumentCount }
 }
 
 function validateCategory(value: unknown): DocumentCategory {

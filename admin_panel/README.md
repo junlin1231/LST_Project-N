@@ -24,6 +24,18 @@ http://127.0.0.1:8000/
 
 ## Docker
 
+Preferred full-system Docker setup is from the accounting app directory:
+
+```bash
+cd "accounting system"
+cp .env.example .env
+docker compose up --build
+```
+
+That stack starts PostgreSQL, the accounting app, and this admin panel together. The admin panel uses the accounting PostgreSQL database so company management works.
+
+To run only the admin panel against an already-running accounting database exposed on the host:
+
 ```bash
 cd admin_panel
 docker compose up --build
@@ -42,6 +54,8 @@ Email: admin@example.com
 Password: admin12345
 ```
 
+Override `DATABASE_URL` if your accounting PostgreSQL database is not available at `postgresql://accounting:accounting@host.docker.internal:5432/accounting`.
+
 ## Accounting App Gate
 
 The accounting app at `http://localhost:3000/` is protected by the Django login.
@@ -55,6 +69,7 @@ Django login success -> set lst_access_token -> return to accounting app
 ```
 
 Both apps must use the same `AUTH_SHARED_SECRET`.
+Company management also requires the admin panel to use the accounting app PostgreSQL database. The full-system accounting Docker compose wires this automatically.
 
 For local Docker, both compose files default to:
 
@@ -77,10 +92,23 @@ Use `localhost` for both apps. Cookies are shared by host, not port, so `localho
 - `/accept-invitation/<id>/` - invitation acceptance and password setup
 - `/admin-panel/` - access dashboard
 - `/admin-panel/users/` - user management
+- `/admin-panel/companies/` - accounting company and membership management
 - `/admin-panel/access-requests/` - approve/reject requests
 - `/admin-panel/invitations/` - invite or revoke users
 - `/admin-panel/audit-logs/` - access audit log
 - `/django-admin/` - Django built-in admin
+
+## Company Management
+
+Company registration is controlled from the admin panel. Admins create accounting companies on `/admin-panel/companies/`, then assign approved users to a company with one of these accounting roles:
+
+- `owner`
+- `admin`
+- `accountant`
+- `approver`
+- `viewer`
+
+The accounting app no longer creates a private company automatically for each new login. A user can sign in only after they are approved in the admin panel and assigned to at least one active company.
 
 ## Roles
 

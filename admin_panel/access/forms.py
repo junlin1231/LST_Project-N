@@ -1,7 +1,13 @@
 from django import forms
 from django.contrib.auth.forms import AuthenticationForm, SetPasswordForm
 
-from .models import AccessRequest, Invitation, User
+from .models import (
+    AccessRequest,
+    AccountingCompany,
+    AccountingCompanyMembership,
+    Invitation,
+    User,
+)
 
 
 class AccessLoginForm(AuthenticationForm):
@@ -84,3 +90,27 @@ class UserAccessForm(forms.ModelForm):
 
 class PasswordSetupForm(SetPasswordForm):
     pass
+
+
+class AccountingCompanyForm(forms.ModelForm):
+    class Meta:
+        model = AccountingCompany
+        fields = ["name", "legal_name", "tax_id", "base_currency", "status"]
+
+    def clean_base_currency(self):
+        currency = self.cleaned_data["base_currency"].strip().upper()
+        if len(currency) != 3:
+            raise forms.ValidationError("Use a 3-letter currency code.")
+        return currency
+
+
+class CompanyMembershipForm(forms.Form):
+    email = forms.EmailField(label="User email")
+    role = forms.ChoiceField(choices=AccountingCompanyMembership.Role.choices)
+    status = forms.ChoiceField(choices=AccountingCompanyMembership.Status.choices, initial=AccountingCompanyMembership.Status.ACTIVE)
+
+    def clean_email(self):
+        email = self.cleaned_data["email"].strip().lower()
+        if not User.objects.filter(email=email, status=User.Status.ACTIVE).exists():
+            raise forms.ValidationError("Approve this user in Admin Management before assigning a company.")
+        return email

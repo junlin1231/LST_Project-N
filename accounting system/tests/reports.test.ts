@@ -7,9 +7,11 @@ import {
   buildChangesInEquity,
   buildDepreciationScheduleDrafts,
   buildIncomeStatement,
+  buildOpeningBalanceLines,
   buildPeriodClosePreview,
   buildProfitOrLoss,
   buildTrialBalance,
+  buildYearEndClosePreview,
   calculateMonthlyDepreciation,
 } from "../lib/accounting/reports"
 import type { Account, DepreciationSchedule, FixedAsset, JournalEntry } from "../lib/accounting/types"
@@ -116,4 +118,30 @@ test("period close preview creates revenue, expense, and retained earnings lines
   assert.equal(preview.netIncome, 220)
   assert.equal(preview.trialBalanceBalanced, true)
   assert.equal(preview.lines.some((line) => line.accountId === "3900" && line.credit === 220), true)
+})
+
+test("year-end close preview carries only balance sheet accounts into opening balances", () => {
+  const preview = buildYearEndClosePreview(accounts, entries, [], 2026, "3900")
+
+  assert.equal(preview.netIncome, 220)
+  assert.equal(preview.nextPeriod.startDate, "2027-01-01")
+  assert.equal(preview.openingBalanceLines.some((line) => line.accountId === "4000"), false)
+  assert.equal(preview.openingBalanceLines.some((line) => line.accountId === "5000"), false)
+  assert.equal(preview.openingBalanceLines.some((line) => line.accountId === "1000" && line.debit === 1220), true)
+  assert.equal(preview.openingBalanceLines.some((line) => line.accountId === "3000" && line.credit === 1000), true)
+  assert.equal(preview.openingBalanceLines.some((line) => line.accountId === "3900" && line.credit === 220), true)
+})
+
+test("opening balance lines preserve debit and credit natural sides", () => {
+  const lines = buildOpeningBalanceLines([
+    { accountId: "1000", code: "1000", name: "Cash", type: "asset", amount: 500 },
+    { accountId: "2000", code: "2000", name: "Payable", type: "liability", amount: 300 },
+    { accountId: "3000", code: "3000", name: "Capital", type: "equity", amount: 200 },
+  ])
+
+  assert.deepEqual(lines, [
+    { accountId: "1000", debit: 500, credit: 0 },
+    { accountId: "2000", debit: 0, credit: 300 },
+    { accountId: "3000", debit: 0, credit: 200 },
+  ])
 })

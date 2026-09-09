@@ -30,7 +30,7 @@ interface MembershipRow {
 }
 
 function requestUserId(request: NextRequest) {
-  return request.cookies.get(SESSION_COOKIE_NAME)?.value.trim() || request.headers.get("x-user-id")?.trim()
+  return request.headers.get("x-user-id")?.trim()
 }
 
 function base64UrlDecode(value: string) {
@@ -233,29 +233,11 @@ export async function loginByEmail(input: { email: string; name?: string }) {
   }
 
   const userId = `user-${randomUUID()}`
-  const companyId = `company-${randomUUID()}`
   const name = input.name?.trim() || displayNameFromEmail(email)
-  const companyName = `${name}'s Company`
-
-  await transaction(async (client) => {
-    await client.query(
-      "INSERT INTO companies (id, name, base_currency, ocr_own_names) VALUES ($1, $2, 'MYR', ARRAY[$2]::TEXT[])",
-      [companyId, companyName],
-    )
-    await client.query(
-      "INSERT INTO users (id, company_id, name, email, role) VALUES ($1, $2, $3, $4, 'admin')",
-      [userId, companyId, name, email],
-    )
-    await client.query(
-      `INSERT INTO company_memberships (id, company_id, user_id, role, status)
-       VALUES ($1, $2, $3, 'owner', 'active')`,
-      [`membership-${randomUUID()}`, companyId, userId],
-    )
-    await client.query(
-      "INSERT INTO user_preferences (user_id, active_company_id) VALUES ($1, $2)",
-      [userId, companyId],
-    )
-  })
+  await query(
+    "INSERT INTO users (id, company_id, name, email, role) VALUES ($1, $2, $3, $4, 'user')",
+    [userId, DEMO_COMPANY_ID, name, email],
+  )
 
   return { id: userId, name, email }
 }

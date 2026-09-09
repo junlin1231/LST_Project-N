@@ -1,3 +1,5 @@
+from uuid import uuid4
+
 from django.conf import settings
 from django.contrib.auth.models import AbstractUser
 from django.db import models
@@ -125,3 +127,113 @@ class AccessAuditLog(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
+
+
+class AccountingCompany(models.Model):
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Active"
+        SUSPENDED = "suspended", "Suspended"
+        ARCHIVED = "archived", "Archived"
+
+    id = models.CharField(max_length=80, primary_key=True, blank=True)
+    name = models.CharField(max_length=255)
+    legal_name = models.CharField(max_length=255, blank=True, null=True)
+    tax_id = models.CharField(max_length=80, blank=True, null=True)
+    base_currency = models.CharField(max_length=3, default="MYR")
+    status = models.CharField(max_length=32, choices=Status.choices, default=Status.ACTIVE)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        managed = False
+        db_table = "companies"
+        ordering = ["name"]
+        verbose_name = "Accounting company"
+        verbose_name_plural = "Accounting companies"
+
+    def save(self, *args, **kwargs):
+        if not self.id:
+            self.id = f"company-{uuid4()}"
+        if self.base_currency:
+            self.base_currency = self.base_currency.strip().upper()[:3]
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.name
+
+
+class AccountingUser(models.Model):
+    id = models.CharField(max_length=80, primary_key=True, blank=True)
+    company = models.ForeignKey(AccountingCompany, db_column="company_id", on_delete=models.CASCADE)
+    name = models.CharField(max_length=255)
+    email = models.EmailField(unique=True)
+    role = models.CharField(max_length=32, default="user")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        managed = False
+        db_table = "users"
+        ordering = ["email"]
+        verbose_name = "Accounting user"
+        verbose_name_plural = "Accounting users"
+
+    def save(self, *args, **kwargs):
+        if not self.id:
+            self.id = f"user-{uuid4()}"
+        self.email = self.email.strip().lower()
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.email
+
+
+class AccountingCompanyMembership(models.Model):
+    class Role(models.TextChoices):
+        OWNER = "owner", "Owner"
+        ADMIN = "admin", "Admin"
+        ACCOUNTANT = "accountant", "Accountant"
+        APPROVER = "approver", "Approver"
+        VIEWER = "viewer", "Viewer"
+
+    class Status(models.TextChoices):
+        INVITED = "invited", "Invited"
+        ACTIVE = "active", "Active"
+        DISABLED = "disabled", "Disabled"
+
+    id = models.CharField(max_length=100, primary_key=True, blank=True)
+    company = models.ForeignKey(AccountingCompany, db_column="company_id", on_delete=models.CASCADE)
+    user = models.ForeignKey(AccountingUser, db_column="user_id", on_delete=models.CASCADE)
+    role = models.CharField(max_length=32, choices=Role.choices, default=Role.VIEWER)
+    status = models.CharField(max_length=32, choices=Status.choices, default=Status.ACTIVE)
+    invited_by = models.CharField(max_length=80, blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        managed = False
+        db_table = "company_memberships"
+        ordering = ["company__name", "user__email"]
+        verbose_name = "Accounting company membership"
+        verbose_name_plural = "Accounting company memberships"
+
+    def save(self, *args, **kwargs):
+        if not self.id:
+            self.id = f"membership-{uuid4()}"
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.user.email} - {self.company.name}"
+
+
+class AccountingUserPreference(models.Model):
+    user = models.OneToOneField(AccountingUser, db_column="user_id", primary_key=True, on_delete=models.CASCADE)
+    active_company = models.ForeignKey(AccountingCompany, db_column="active_company_id", blank=True, null=True, on_delete=models.SET_NULL)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        managed = False
+        db_table = "user_preferences"
+        verbose_name = "Accounting user preference"
+        verbose_name_plural = "Accounting user preferences"

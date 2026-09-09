@@ -2,6 +2,7 @@ import { calculateBalances, calculateFinancialSummary } from "./calculations"
 import {
   NORMAL_BALANCE,
   type Account,
+  type ClosingBalanceLine,
   type CashFlowReport,
   type DepreciationSchedule,
   type EquityChangesReport,
@@ -17,6 +18,7 @@ import {
   type ReportSection,
   type StockBalance,
   type VendorBill,
+  type YearEndClosePreview,
 } from "./types"
 
 export interface TrialBalanceRow {
@@ -353,5 +355,78 @@ export function buildPeriodClosePreview(accounts: Account[], entries: JournalEnt
     draftDepreciationCount: depreciationSchedules.filter((schedule) => schedule.status === "draft" && inRange(schedule.periodDate, startDate, endDate)).length,
     alreadyClosed: posted(entries).some((entry) => entry.reference === `CLOSE-${startDate}-${endDate}`),
     lines,
+  }
+}
+
+export function buildClosingBalanceSnapshot(accounts: Account[], entries: JournalEntry[], asOfDate: string): ClosingBalanceLine[] {
+  return calculateBalances(accounts, posted(entries).filter((entry) => entry.date <= asOfDate))
+    .filter((balance) => ["asset", "liability", "equity"].includes(balance.account.type) && Math.abs(balance.natural) >= 0.005)
+    .map((balance) => ({
+      accountId: balance.account.id,
+      code: balance.account.code,
+      name: balance.account.name,
+      type: balance.account.type,
+      amount: Number(balance.natural.toFixed(2)),
+    }))
+    .sort((a, b) => a.code.localeCompare(b.code))
+}
+
+export function buildOpeningBalanceLines(closingBalance: ClosingBalanceLine[]): JournalLine[] {
+  return closingBalance
+    .map((line) => {
+      const normalSide = NORMAL_BALANCE[line.type]
+      if (normalSide === "debit") {
+        return line.amount >= 0
+          ? { accountId: line.accountId, debit: line.amount, credit: 0 }
+          : { accountId: line.accountId, debit: 0, credit: Math.abs(line.amount) }
+      }
+      return line.amount >= 0
+        ? { accountId: line.accountId, debit: 0, credit: line.amount }
+        : { accountId: line.accountId, debit: Math.abs(line.amount), credit: 0 }
+    })
+    .filter((line) => Math.abs(line.debit - line.credit) >= 0.005)
+}
+
+export function buildYearEndClosePreview(
+  accounts: Account[],
+  entries: JournalEntry[],
+  depreciationSchedules: DepreciationSchedule[],
+  fiscalYear: number,
+  retainedEarningsAccountId = DEFAULT_RETAINED_EARNINGS_ACCOUNT_ID,
+): YearEndClosePreview {
+  const startDate = `${fiscalYear}-01-01`
+  const endDate = `${fiscalYear}-12-31`
+  const nextStartDate = `${fiscalYear + 1}-01-01`
+  const nextEndDate = `${fiscalYear + 1}-12-31`
+  const periodClose = buildPeriodClosePreview(accounts, entries, depreciationSchedules, startDate, endDate)
+  const closingLines = periodClose.lines.map((line) => line.accountId === DEFAULT_RETAINED_EARNINGS_ACCOUNT_ID ? { ...line, accountId: retainedEarningsAccountId } : line)
+  const closingEntry: JournalEntry = {
+    id: "year-end-preview-close",
+    date: endDate,
+    description: `Year-end close ${fiscalYear}`,
+    reference: `YEC-${fiscalYear}`,
+    status: "posted",
+    lines: closingLines,
+  }
+  const closingBalance = buildClosingBalanceSnapshot(accounts, [...entries, closingEntry], endDate)
+  const openingBalanceLines = buildOpeningBalanceLines(closingBalance)
+  const openingDebit = openingBalanceLines.reduce((sum, line) => sum + line.debit, 0)
+  const openingCredit = openingBalanceLines.reduce((sum, line) => sum + line.credit, 0)
+  const warnings = [
+    periodClose.trialBalanceBalanced ? "" : "Trial balance is not balanced.",
+    periodClose.draftDepreciationCount > 0 ? `${periodClose.draftDepreciationCount} draft depreciation schedules remain in the year.` : "",
+    Math.abs(openingDebit - openingCredit) < 0.005 ? "" : "Generated opening balance is not balanced.",
+  ].filter(Boolean)
+
+  return {
+    ...periodClose,
+    fiscalYear,
+    period: { startDate, endDate },
+    nextPeriod: { startDate: nextStartDate, endDate: nextEndDate },
+    retainedEarningsAccountId,
+    lines: closingLines,
+    closingBalance,
+    openingBalanceLines,
+    warnings,
   }
 }

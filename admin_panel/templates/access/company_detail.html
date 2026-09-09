@@ -1,0 +1,53 @@
+{% extends "access/base.html" %}
+{% block title %}{{ company.name }}{% endblock %}
+{% block content %}
+<header class="page-header">
+  <h1>{{ company.name }}</h1>
+  <p class="muted">Manage company profile and user membership.</p>
+</header>
+
+<section class="grid-two">
+  <article class="panel inline-panel">
+    <h2>Company details</h2>
+    <form class="form" method="post">
+      {% csrf_token %}
+      <input type="hidden" name="action" value="update_company">
+      {{ company_form.as_p }}
+      <button type="submit">Save company</button>
+    </form>
+  </article>
+
+  <article class="panel inline-panel">
+    <h2>Add or update member</h2>
+    <form class="form" method="post">
+      {% csrf_token %}
+      <input type="hidden" name="action" value="save_membership">
+      {{ membership_form.as_p }}
+      <button type="submit">Save membership</button>
+    </form>
+  </article>
+</section>
+
+<section class="section-block">
+  <h2>Members</h2>
+  <table>
+    <thead>
+      <tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th></tr>
+    </thead>
+    <tbody>
+      {% for membership in memberships %}
+        <tr>
+          <td>{{ membership.user.name }}</td>
+          <td>{{ membership.user.email }}</td>
+          <td>{{ membership.role }}</td>
+          <td><span class="badge">{{ membership.status }}</span></td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="4">No members assigned.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<a class="link" href="{% url 'admin_companies' %}">Back to companies</a>
+{% endblock %}

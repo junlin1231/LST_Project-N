@@ -20,8 +20,13 @@ import {
   postDraftJournalEntry,
   postDepreciationSchedule,
   postPeriodClose,
+  postYearEndClose,
   previewPeriodClose,
+  previewYearEndClose,
+  approvePeriodUnlock,
   generateDepreciationSchedules,
+  rejectPeriodUnlock,
+  requestPeriodUnlock,
   reverseJournalEntry,
   resetSystemData,
   updateDraftJournalEntry,
@@ -65,7 +70,7 @@ function errorResponse(error: unknown) {
   return NextResponse.json({ error: message }, { status: 500 })
 }
 
-const READ_ONLY_ACTIONS = new Set(["previewPeriodClose"])
+const READ_ONLY_ACTIONS = new Set(["previewPeriodClose", "previewYearEndClose"])
 const ACCOUNTING_WRITE_ROLES = ["owner", "admin", "accountant", "approver"] as const
 const ACCOUNTING_CONTROL_ROLES = ["owner", "admin", "accountant"] as const
 
@@ -83,7 +88,13 @@ export async function POST(request: NextRequest) {
       const body = await request.json()
       if (body.action === "resetSystemData" || body.action === "resetAndLoadDemoData") {
         requireRole(ctx, ["owner"])
-      } else if (body.action === "reverseJournalEntry" || body.action === "createAdjustmentJournalEntry") {
+      } else if (
+        body.action === "reverseJournalEntry"
+        || body.action === "createAdjustmentJournalEntry"
+        || body.action === "postYearEndClose"
+        || body.action === "approvePeriodUnlock"
+        || body.action === "rejectPeriodUnlock"
+      ) {
         requireRole(ctx, [...ACCOUNTING_CONTROL_ROLES])
       } else if (!READ_ONLY_ACTIONS.has(String(body.action))) {
         requireRole(ctx, [...ACCOUNTING_WRITE_ROLES])
@@ -112,6 +123,16 @@ export async function POST(request: NextRequest) {
           return NextResponse.json(await previewPeriodClose(String(body.periodStart), String(body.periodEnd)))
         case "postPeriodClose":
           return NextResponse.json(await postPeriodClose(String(body.periodStart), String(body.periodEnd), String(body.retainedEarningsAccountId), body.confirmation as ConfirmationMetadata))
+        case "previewYearEndClose":
+          return NextResponse.json(await previewYearEndClose(Number(body.fiscalYear), String(body.retainedEarningsAccountId)))
+        case "postYearEndClose":
+          return NextResponse.json(await postYearEndClose(Number(body.fiscalYear), String(body.retainedEarningsAccountId), body.confirmation as ConfirmationMetadata))
+        case "requestPeriodUnlock":
+          return NextResponse.json(await requestPeriodUnlock(String(body.periodId), String(body.reason), String(body.impactSummary)))
+        case "approvePeriodUnlock":
+          return NextResponse.json(await approvePeriodUnlock(String(body.requestId), String(body.allowedUntil), body.confirmation as ConfirmationMetadata))
+        case "rejectPeriodUnlock":
+          return NextResponse.json(await rejectPeriodUnlock(String(body.requestId), String(body.rejectionReason), body.confirmation as ConfirmationMetadata))
         case "updateStockItem":
           return NextResponse.json(await updateStockItem(String(body.id), body.item as Omit<StockItem, "id">))
         case "updateWarehouse":

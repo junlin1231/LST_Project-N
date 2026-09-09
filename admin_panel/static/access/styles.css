@@ -84,6 +84,15 @@ a {
   background: var(--panel);
 }
 
+.inline-panel {
+  max-width: none;
+  margin: 0;
+}
+
+.section-block {
+  margin-top: 24px;
+}
+
 .login-screen {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(360px, 480px);
@@ -289,6 +298,27 @@ th {
   gap: 8px;
 }
 
+.toolbar {
+  margin-bottom: 12px;
+}
+
+.search-toolbar label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.search-controls {
+  display: flex;
+  gap: 8px;
+}
+
+.search-controls input {
+  min-width: 0;
+}
+
 .messages {
   margin-bottom: 16px;
 }
@@ -332,5 +362,9 @@ th {
 
   .login-card {
     margin-top: 24px;
+  }
+
+  .search-controls {
+    display: grid;
   }
 }

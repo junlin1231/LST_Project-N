@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 
 const ACCESS_COOKIE_NAME = process.env.ACCESS_COOKIE_NAME || "lst_access_token"
+const LEGACY_SESSION_COOKIE_NAME = "lst_user_id"
 const AUTH_SHARED_SECRET = process.env.AUTH_SHARED_SECRET || "dev-only-change-me"
 const DJANGO_LOGIN_URL = process.env.DJANGO_LOGIN_URL || "http://localhost:8000/login/"
 
@@ -57,6 +58,7 @@ function loginRedirect(request: NextRequest) {
   redirectUrl.searchParams.set("next", returnUrl)
   const response = NextResponse.redirect(redirectUrl)
   response.cookies.delete(ACCESS_COOKIE_NAME)
+  response.cookies.delete(LEGACY_SESSION_COOKIE_NAME)
   return response
 }
 

@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <title>Invoice</title>
+    <style>
+        body { 
+            font-family: Arial, sans-serif; 
+            font-size: 13px; 
+            color: #333; 
+            margin: 0; 
+            padding: 0; 
+            background: #eee;
+        }
+        .page {
+            width: 210mm;
+            min-height: 297mm;
+            padding: 15mm 20mm;
+            margin: 10mm auto;
+            background: #fff;
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.15);
+            box-sizing: border-box;
+            position: relative;
+        }
+        @media print {
+            body { background: none; }
+            .page { margin: 0; box-shadow: none; width: 100%; min-height: 100vh; }
+        }
+        .header { display: flex; justify-content: space-between; margin-bottom: 20px; }
+        .company-info h2 { margin: 0 0 5px 0; color: #333; font-size: 16px; }
+        .company-info p { margin: 0; line-height: 1.4; color: #555; }
+        .invoice-details { text-align: right; }
+        .invoice-details h3 { margin: 0 0 5px 0; font-size: 18px; color: #000; }
+        .invoice-details p { margin: 0; line-height: 1.4; }
+        .bill-to { margin-bottom: 20px; line-height: 1.4; }
+        table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
+        table th, table td { border: none; padding: 8px; text-align: left; }
+        table th { background-color: #f4f4f4; font-size: 12px; border-top: 1px solid #ccc; border-bottom: 1px solid #ccc; }
+        .content-section { display: flex; justify-content: space-between; margin-top: 20px; align-items: flex-start; }
+        .terms { width: 55%; font-size: 11px; line-height: 1.4; color: #444; }
+        .terms h4 { margin: 0 0 5px 0; font-size: 12px; }
+        .totals { width: 40%; }
+        .totals table td { border: none; padding: 4px 8px; }
+        .totals table td:last-child { text-align: right; }
+        .bottom-row { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 20px; }
+        .amount-words { font-weight: bold; width: 55%; }
+        .signatures { display: flex; justify-content: space-between; margin-top: 80px; }
+        .signature-box { width: 40%; border-top: 1px solid #333; padding-top: 5px; }
+    </style>
+</head>
+<body>
+    <div class="page">
+        <div class="header">
+            <div class="company-info">
+                <h2>TECHMATION (MALAYSIA) SDN BHD (1629697D)</h2>
+                <p>PT 11663, Jalan Techvalley 1/2 Sendayan Techvalley Bandar Sri Sendayan<br>Tel: 0162291790</p>
+            </div>
+            <div class="invoice-details">
+                <h3>Invoice</h3>
+                <p><strong>Invoice No.:</strong> INV2608/009<br>
+                <strong>Date:</strong> Aug 28, 2026<br>
+                <strong>Term:</strong> 30 DAYS<br>
+                <strong>Due Date:</strong> Sep 27, 2026</p>
+            </div>
+        </div>
+        
+        <div class="bill-to">
+            <strong>Bill To:</strong><br>
+            WY MACHINERY SDN BHD<br>
+            No 23A, Jalan MJ17, Taman Industri Meranti Jaya, 47120<br>
+            Tel No.: 018-7788143<br>
+            Email: -
+        </div>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>CODE</th>
+                    <th>DESCRIPTION</th>
+                    <th>QTY</th>
+                    <th>UOM</th>
+                    <th>UNIT PRICE (MYR)</th>
+                    <th>DISCOUNT</th>
+                    <th>AMOUNT (MYR)</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>TM-137528</td>
+                    <td>7NBI5620Q8AXA140_8</td>
+                    <td>2</td>
+                    <td>UNIT(S)</td>
+                    <td>4,000.00</td>
+                    <td>0.00</td>
+                    <td>8,000.00</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="bottom-row">
+            <div class="amount-words">
+                MALAYSIAN RINGGIT EIGHT THOUSAND ONLY
+            </div>
+            <div class="totals" style="width: 40%;">
+                <table>
+                    <tr>
+                        <td><strong>TAXABLE AMOUNT</strong></td>
+                        <td>8,000.00</td>
+                    </tr>
+                    <tr>
+                        <td><strong>TAX (0.00)</strong></td>
+                        <td>0.00</td>
+                    </tr>
+                    <tr>
+                        <td><strong>TOTAL AMOUNT</strong></td>
+                        <td><strong>8,000.00</strong></td>
+                    </tr>
+                </table>
+            </div>
+        </div>
+
+        <div class="content-section" style="margin-top: 0;">
+            <div class="terms">
+                <h4>TERMS & CONDITIONS</h4>
+                <p>1. Payment shall be made based on the payment terms stated in this invoice.<br>
+                2. All payments made are non-refundable.<br>
+                3. Goods and/or services provided shall remain the property of the Company until full payment has been received.</p>
+                
+                <h4 style="margin-top: 15px;">PAYMENT DETAILS</h4>
+                <p>Bank Name: Industrial and Commercial Bank of China (ICBC)<br>
+                Account Name: TECHMATION (MALAYSIA) SDN. BHD.<br>
+                Account Number: 0129000100001998375</p>
+            </div>
+        </div>
+
+        <div class="signatures">
+            <div class="signature-box">
+                Confirmed by:
+            </div>
+            <div class="signature-box">
+                Received by:
+            </div>
+        </div>
+    </div>
+</body>
+</html>

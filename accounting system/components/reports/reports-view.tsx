@@ -25,6 +25,7 @@ import {
   buildPeriodClosePreview,
   buildProfitOrLoss,
   buildTrialBalance,
+  buildYearEndClosePreview,
   calculateMonthlyDepreciation,
   DEFAULT_RETAINED_EARNINGS_ACCOUNT_ID,
 } from "@/lib/accounting/reports"
@@ -181,12 +182,17 @@ export function ReportsView() {
     stockBalances,
     fixedAssets,
     depreciationSchedules,
+    accountingPeriods,
+    periodUnlockRequests,
     addFixedAsset,
     updateFixedAsset,
     generateDepreciationSchedules,
     postDepreciationSchedule,
     previewPeriodClose,
     postPeriodClose,
+    postYearEndClose,
+    requestPeriodUnlock,
+    approvePeriodUnlock,
     accountName,
   } = useAccounting()
   const [periodStart, setPeriodStart] = useState(yearStart)
@@ -200,6 +206,14 @@ export function ReportsView() {
   const [pendingDepreciation, setPendingDepreciation] = useState<DepreciationSchedule | null>(null)
   const [closeMessage, setCloseMessage] = useState("")
   const [pendingClose, setPendingClose] = useState(false)
+  const [fiscalYear, setFiscalYear] = useState(Number(today.slice(0, 4)))
+  const [pendingYearEndClose, setPendingYearEndClose] = useState(false)
+  const [yearEndMessage, setYearEndMessage] = useState("")
+  const [unlockPeriodId, setUnlockPeriodId] = useState("")
+  const [unlockReason, setUnlockReason] = useState("")
+  const [unlockImpact, setUnlockImpact] = useState("")
+  const [unlockAllowedUntil, setUnlockAllowedUntil] = useState(`${today}T23:59`)
+  const [pendingUnlockApprovalId, setPendingUnlockApprovalId] = useState<string | null>(null)
   const [retainedEarningsAccountId, setRetainedEarningsAccountId] = useState(DEFAULT_RETAINED_EARNINGS_ACCOUNT_ID)
   const [drillTarget, setDrillTarget] = useState<DrillTarget | null>(null)
   const [selectedEntryDetail, setSelectedEntryDetail] = useState<JournalEntry | null>(null)
@@ -230,11 +244,18 @@ export function ReportsView() {
   const equity = useMemo(() => buildChangesInEquity(accounts, journalEntries, periodStart, periodEnd), [accounts, journalEntries, periodEnd, periodStart])
   const notes = useMemo(() => buildFinancialStatementNotes({ accounts, entries: journalEntries, invoices, vendorBills, fixedAssets, stockBalances, startDate: periodStart, endDate: periodEnd }), [accounts, fixedAssets, invoices, journalEntries, periodEnd, periodStart, stockBalances, vendorBills])
   const closePreview = useMemo(() => buildPeriodClosePreview(accounts, journalEntries, depreciationSchedules, periodStart, periodEnd), [accounts, depreciationSchedules, journalEntries, periodEnd, periodStart])
+  const yearEndPreview = useMemo(() => {
+    const preview = buildYearEndClosePreview(accounts, journalEntries, depreciationSchedules, fiscalYear, retainedEarningsAccountId)
+    const alreadyClosed = accountingPeriods.some((period) => period.periodType === "year" && period.fiscalYear === fiscalYear && period.status === "closed")
+      || journalEntries.some((entry) => entry.reference === `YEC-${fiscalYear}`)
+    return { ...preview, alreadyClosed }
+  }, [accountingPeriods, accounts, depreciationSchedules, fiscalYear, journalEntries, retainedEarningsAccountId])
   const totalDebits = trialBalance.reduce((sum, row) => sum + row.debit, 0)
   const totalCredits = trialBalance.reduce((sum, row) => sum + row.credit, 0)
   const assetAccounts = accounts.filter((account) => account.type === "asset")
   const expenseAccounts = accounts.filter((account) => account.type === "expense")
   const equityAccounts = accounts.filter((account) => account.type === "equity")
+  const yearlyPeriods = accountingPeriods.filter((period) => period.periodType === "year")
   const accountById = useMemo(() => new Map(accounts.map((account) => [account.id, account])), [accounts])
   const contactName = (id?: string) => contacts.find((contact) => contact.id === id)?.name ?? "-"
 
@@ -632,8 +653,8 @@ export function ReportsView() {
 
       <Tabs defaultValue="overview">
         <TabsList className="flex h-auto w-full flex-wrap justify-start">
-          {["overview", "trial", "ledger", "profit", "position", "cash", "equity", "notes", "assets", "close"].map((tab) => (
-            <TabsTrigger key={tab} value={tab}>{tab === "trial" ? "Trial Balance" : tab === "profit" ? "Profit or Loss" : tab === "position" ? "Financial Position" : tab === "cash" ? "Cash Flows" : tab === "assets" ? "Fixed Assets" : tab === "close" ? "Period Close" : tab.charAt(0).toUpperCase() + tab.slice(1)}</TabsTrigger>
+          {["overview", "trial", "ledger", "profit", "position", "cash", "equity", "notes", "assets", "close", "year-end"].map((tab) => (
+            <TabsTrigger key={tab} value={tab}>{tab === "trial" ? "Trial Balance" : tab === "profit" ? "Profit or Loss" : tab === "position" ? "Financial Position" : tab === "cash" ? "Cash Flows" : tab === "assets" ? "Fixed Assets" : tab === "close" ? "Period Close" : tab === "year-end" ? "Year-End" : tab.charAt(0).toUpperCase() + tab.slice(1)}</TabsTrigger>
           ))}
         </TabsList>
 
@@ -810,6 +831,48 @@ export function ReportsView() {
             <ExportButton label="Export Close Preview" onClick={exportClosePreview} />
             <Button onClick={() => setPendingClose(true)} disabled={closePreview.alreadyClosed || closePreview.draftDepreciationCount > 0 || !closePreview.trialBalanceBalanced}><Landmark className="size-4" />Post Period Close</Button>
           </div>
+        </TabsContent>
+
+        <TabsContent value="year-end" className="space-y-3">
+          <Card>
+            <CardContent className="grid gap-3 p-4 md:grid-cols-5">
+              <div className="grid gap-1">
+                <Label>Fiscal Year</Label>
+                <Input type="number" value={fiscalYear} onChange={(event) => setFiscalYear(Number(event.target.value))} />
+              </div>
+              <div><p className="text-xs text-muted-foreground">Revenue</p><Amount value={yearEndPreview.revenueTotal} /></div>
+              <div><p className="text-xs text-muted-foreground">Expenses</p><Amount value={yearEndPreview.expenseTotal} /></div>
+              <div><p className="text-xs text-muted-foreground">Net Income</p><Amount value={yearEndPreview.netIncome} colorBySign /></div>
+              <div><p className="text-xs text-muted-foreground">Status</p><p className="text-sm">{yearEndPreview.alreadyClosed ? "Closed" : yearEndPreview.warnings.length ? yearEndPreview.warnings[0] : "Ready"}</p></div>
+            </CardContent>
+          </Card>
+          <div className="grid gap-3 lg:grid-cols-2">
+            <Card className="overflow-hidden py-0">
+              <Table><TableHeader><TableRow><TableHead>Closing Balance</TableHead><TableHead>Type</TableHead><TableHead className="text-right">Amount</TableHead></TableRow></TableHeader><TableBody>{yearEndPreview.closingBalance.map((line) => <TableRow key={line.accountId}><TableCell><span className="font-mono text-xs text-muted-foreground">{line.code}</span> {line.name}</TableCell><TableCell>{ACCOUNT_TYPE_LABEL[line.type]}</TableCell><TableCell className="text-right"><Amount value={line.amount} colorBySign /></TableCell></TableRow>)}</TableBody></Table>
+            </Card>
+            <Card className="overflow-hidden py-0">
+              <Table><TableHeader><TableRow><TableHead>Opening Balance FY {fiscalYear + 1}</TableHead><TableHead className="text-right">Debit</TableHead><TableHead className="text-right">Credit</TableHead></TableRow></TableHeader><TableBody>{yearEndPreview.openingBalanceLines.map((line, index) => <TableRow key={`${line.accountId}-${index}`}><TableCell>{accountName(line.accountId)}</TableCell><TableCell className="text-right"><Amount value={line.debit} /></TableCell><TableCell className="text-right"><Amount value={line.credit} /></TableCell></TableRow>)}</TableBody></Table>
+            </Card>
+          </div>
+          {yearEndMessage ? <p className="text-sm text-muted-foreground">{yearEndMessage}</p> : null}
+          <div className="flex flex-wrap gap-2">
+            <Button onClick={() => setPendingYearEndClose(true)} disabled={yearEndPreview.alreadyClosed || yearEndPreview.warnings.length > 0}><Landmark className="size-4" />Post Year-End Close</Button>
+          </div>
+          <Card>
+            <CardContent className="space-y-3 p-4">
+              <div className="flex flex-wrap items-end gap-2">
+                <div className="grid min-w-48 gap-1"><Label>Locked Year</Label><Select value={unlockPeriodId} onValueChange={(value) => setUnlockPeriodId(value ?? "")}><SelectTrigger><SelectValue placeholder="Select closed year" /></SelectTrigger><SelectContent>{yearlyPeriods.filter((period) => period.status === "closed").map((period) => <SelectItem key={period.id} value={period.id}>{period.name}</SelectItem>)}</SelectContent></Select></div>
+                <div className="grid min-w-56 gap-1"><Label>Reason</Label><Input value={unlockReason} onChange={(event) => setUnlockReason(event.target.value)} /></div>
+                <div className="grid min-w-64 flex-1 gap-1"><Label>Impact</Label><Input value={unlockImpact} onChange={(event) => setUnlockImpact(event.target.value)} /></div>
+                <Button variant="outline" onClick={() => void requestPeriodUnlock(unlockPeriodId, unlockReason, unlockImpact).then(() => { setUnlockReason(""); setUnlockImpact(""); setYearEndMessage("Unlock request submitted.") }).catch((error) => setYearEndMessage(error instanceof Error ? error.message : "Unlock request failed."))}>Request Unlock</Button>
+              </div>
+              <Table><TableHeader><TableRow><TableHead>Year</TableHead><TableHead>Status</TableHead><TableHead>Locked</TableHead><TableHead>Unlock Until</TableHead></TableRow></TableHeader><TableBody>{yearlyPeriods.map((period) => <TableRow key={period.id}><TableCell>{period.name}</TableCell><TableCell><Badge variant={period.status === "closed" ? "secondary" : "outline"}>{period.status}</Badge></TableCell><TableCell>{period.lockedAt ? formatDate(period.lockedAt.slice(0, 10)) : "-"}</TableCell><TableCell>{period.unlockExpiresAt ? formatDate(period.unlockExpiresAt.slice(0, 10)) : "-"}</TableCell></TableRow>)}</TableBody></Table>
+              <div className="flex flex-wrap items-end gap-2">
+                <div className="grid gap-1"><Label>Approve Until</Label><Input type="datetime-local" value={unlockAllowedUntil} onChange={(event) => setUnlockAllowedUntil(event.target.value)} /></div>
+              </div>
+              <Table><TableHeader><TableRow><TableHead>Request</TableHead><TableHead>Status</TableHead><TableHead>Reason</TableHead><TableHead>Impact</TableHead><TableHead className="w-32" /></TableRow></TableHeader><TableBody>{periodUnlockRequests.map((request) => <TableRow key={request.id}><TableCell className="font-mono text-xs">{request.id}</TableCell><TableCell><Badge variant={request.status === "approved" ? "secondary" : "outline"}>{request.status}</Badge></TableCell><TableCell>{request.reason}</TableCell><TableCell>{request.impactSummary}</TableCell><TableCell>{request.status === "pending" ? <Button size="sm" variant="outline" onClick={() => setPendingUnlockApprovalId(request.id)}>Approve</Button> : null}</TableCell></TableRow>)}</TableBody></Table>
+            </CardContent>
+          </Card>
         </TabsContent>
       </Tabs>
 
@@ -1193,6 +1256,41 @@ export function ReportsView() {
             setPendingClose(false)
             setCloseMessage("Period close posted.")
           }).catch((error) => setCloseMessage(error instanceof Error ? error.message : "Period close failed."))
+        }}
+      />
+
+      <ConfirmationDialog
+        open={pendingYearEndClose}
+        title="Post Year-End Close"
+        description="This creates closing figures, locks the closed year, creates the next financial year, and posts the opening balance."
+        impactSummary={`Close FY ${fiscalYear} and carry balances forward to FY ${fiscalYear + 1}. Net income is ${yearEndPreview.netIncome.toFixed(2)}.`}
+        confirmationPhrase={UPDATE_CONFIRMATION_PHRASE}
+        confirmLabel="Post Year-End Close"
+        onOpenChange={setPendingYearEndClose}
+        requireReason
+        onConfirm={(confirmation) => {
+          void postYearEndClose(fiscalYear, retainedEarningsAccountId, confirmation).then(() => {
+            setPendingYearEndClose(false)
+            setYearEndMessage(`FY ${fiscalYear} closed and FY ${fiscalYear + 1} opening balance posted.`)
+          }).catch((error) => setYearEndMessage(error instanceof Error ? error.message : "Year-end close failed."))
+        }}
+      />
+
+      <ConfirmationDialog
+        open={pendingUnlockApprovalId !== null}
+        title="Approve Period Unlock"
+        description="This temporarily allows corrections inside a locked historical year."
+        impactSummary={`Approve locked period edits until ${unlockAllowedUntil}.`}
+        confirmationPhrase={UPDATE_CONFIRMATION_PHRASE}
+        confirmLabel="Approve Unlock"
+        onOpenChange={(open) => { if (!open) setPendingUnlockApprovalId(null) }}
+        requireReason
+        onConfirm={(confirmation) => {
+          if (!pendingUnlockApprovalId) return
+          void approvePeriodUnlock(pendingUnlockApprovalId, unlockAllowedUntil, confirmation).then(() => {
+            setPendingUnlockApprovalId(null)
+            setYearEndMessage("Unlock request approved.")
+          }).catch((error) => setYearEndMessage(error instanceof Error ? error.message : "Unlock approval failed."))
         }}
       />
     </div>

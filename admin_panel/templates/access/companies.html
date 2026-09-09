@@ -1,0 +1,67 @@
+{% extends "access/base.html" %}
+{% block title %}Companies{% endblock %}
+{% block content %}
+<header class="page-header">
+  <h1>Companies</h1>
+  <p class="muted">Create accounting companies and keep company registration under admin control.</p>
+</header>
+
+<section class="grid-two">
+  <article class="panel inline-panel">
+    <h2>Create company</h2>
+    <form class="form" method="post">
+      {% csrf_token %}
+      {{ form.as_p }}
+      <button type="submit">Create company</button>
+    </form>
+  </article>
+
+  <article>
+    <form class="toolbar search-toolbar" method="get">
+      <label for="company-search">Search companies</label>
+      <div class="search-controls">
+        <input
+          id="company-search"
+          name="q"
+          type="search"
+          value="{{ search_query }}"
+          placeholder="Name, legal name, tax ID, currency, or status"
+        >
+        <button type="submit">Search</button>
+        {% if search_query %}
+          <a class="button secondary" href="{% url 'admin_companies' %}">Clear</a>
+        {% endif %}
+      </div>
+    </form>
+
+    <table>
+      <thead>
+        <tr><th>Name</th><th>Currency</th><th>Status</th><th></th></tr>
+      </thead>
+      <tbody>
+        {% for company in companies %}
+          <tr>
+            <td>
+              <strong>{{ company.name }}</strong>
+              {% if company.legal_name %}<div class="muted">{{ company.legal_name }}</div>{% endif %}
+            </td>
+            <td>{{ company.base_currency }}</td>
+            <td><span class="badge">{{ company.status }}</span></td>
+            <td><a href="{% url 'admin_company_detail' company.id %}">Manage</a></td>
+          </tr>
+        {% empty %}
+          <tr>
+            <td colspan="4">
+              {% if search_query %}
+                No companies match "{{ search_query }}".
+              {% else %}
+                No companies yet.
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </article>
+</section>
+{% endblock %}

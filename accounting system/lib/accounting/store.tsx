@@ -4,6 +4,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState, t
 import type { ConfirmationMetadata } from "./governance"
 import type {
   Account,
+  AccountingPeriod,
   AccountingSnapshot,
   AccountType,
   AuditLog,
@@ -16,6 +17,7 @@ import type {
   PaymentAllocation,
   PaymentVoucher,
   PeriodClosePreview,
+  PeriodUnlockRequest,
   Receipt,
   StockBalance,
   StockItem,
@@ -23,6 +25,7 @@ import type {
   VendorBill,
   Warehouse,
   WorkflowDocument,
+  YearEndClosePreview,
 } from "./types"
 import {
   calculateBalances,
@@ -51,6 +54,8 @@ interface Store {
   fixedAssets: FixedAsset[]
   depreciationSchedules: DepreciationSchedule[]
   auditLogs: AuditLog[]
+  accountingPeriods: AccountingPeriod[]
+  periodUnlockRequests: PeriodUnlockRequest[]
   addJournalEntry: (entry: Omit<JournalEntry, "id">, confirmation: ConfirmationMetadata) => void
   addDraftJournalEntry: (entry: Omit<JournalEntry, "id" | "status" | "postedAt">) => void
   updateDraftJournalEntry: (id: string, entry: Omit<JournalEntry, "id" | "status" | "postedAt">) => void
@@ -69,6 +74,11 @@ interface Store {
   postDepreciationSchedule: (id: string, confirmation: ConfirmationMetadata) => Promise<void>
   previewPeriodClose: (periodStart: string, periodEnd: string) => Promise<PeriodClosePreview>
   postPeriodClose: (periodStart: string, periodEnd: string, retainedEarningsAccountId: string, confirmation: ConfirmationMetadata) => Promise<void>
+  previewYearEndClose: (fiscalYear: number, retainedEarningsAccountId: string) => Promise<YearEndClosePreview>
+  postYearEndClose: (fiscalYear: number, retainedEarningsAccountId: string, confirmation: ConfirmationMetadata) => Promise<void>
+  requestPeriodUnlock: (periodId: string, reason: string, impactSummary: string) => Promise<void>
+  approvePeriodUnlock: (requestId: string, allowedUntil: string, confirmation: ConfirmationMetadata) => Promise<void>
+  rejectPeriodUnlock: (requestId: string, rejectionReason: string, confirmation: ConfirmationMetadata) => Promise<void>
   updateStockItem: (id: string, item: Omit<StockItem, "id">) => void
   updateWarehouse: (id: string, warehouse: Omit<Warehouse, "id">) => void
   addOpeningStock: (openingStock: OpeningStockInput) => Promise<void>
@@ -143,6 +153,8 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
   const [fixedAssets, setFixedAssets] = useState<FixedAsset[]>([])
   const [depreciationSchedules, setDepreciationSchedules] = useState<DepreciationSchedule[]>([])
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([])
+  const [accountingPeriods, setAccountingPeriods] = useState<AccountingPeriod[]>([])
+  const [periodUnlockRequests, setPeriodUnlockRequests] = useState<PeriodUnlockRequest[]>([])
 
   const refresh = useCallback(async () => {
     try {
@@ -163,6 +175,8 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
       setFixedAssets(snapshot.fixedAssets)
       setDepreciationSchedules(snapshot.depreciationSchedules)
       setAuditLogs(snapshot.auditLogs)
+      setAccountingPeriods(snapshot.accountingPeriods)
+      setPeriodUnlockRequests(snapshot.periodUnlockRequests)
     } catch (error) {
       console.error(error)
     }
@@ -284,6 +298,8 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
     setFixedAssets(snapshot.fixedAssets)
     setDepreciationSchedules(snapshot.depreciationSchedules)
     setAuditLogs(snapshot.auditLogs)
+    setAccountingPeriods(snapshot.accountingPeriods)
+    setPeriodUnlockRequests(snapshot.periodUnlockRequests)
   }, [])
 
   const addInvoice = useCallback((invoice: Omit<Invoice, "id" | "number">) => {
@@ -362,6 +378,30 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
     applySnapshot(snapshot)
   }, [applySnapshot])
 
+  const previewYearEndCloseAction = useCallback((fiscalYear: number, retainedEarningsAccountId: string) => {
+    return postAccountingAction<YearEndClosePreview>({ action: "previewYearEndClose", fiscalYear, retainedEarningsAccountId })
+  }, [])
+
+  const postYearEndCloseAction = useCallback(async (fiscalYear: number, retainedEarningsAccountId: string, confirmation: ConfirmationMetadata) => {
+    const snapshot = await postAccountingAction<AccountingSnapshot>({ action: "postYearEndClose", fiscalYear, retainedEarningsAccountId, confirmation })
+    applySnapshot(snapshot)
+  }, [applySnapshot])
+
+  const requestPeriodUnlockAction = useCallback(async (periodId: string, reason: string, impactSummary: string) => {
+    const snapshot = await postAccountingAction<AccountingSnapshot>({ action: "requestPeriodUnlock", periodId, reason, impactSummary })
+    applySnapshot(snapshot)
+  }, [applySnapshot])
+
+  const approvePeriodUnlockAction = useCallback(async (requestId: string, allowedUntil: string, confirmation: ConfirmationMetadata) => {
+    const snapshot = await postAccountingAction<AccountingSnapshot>({ action: "approvePeriodUnlock", requestId, allowedUntil, confirmation })
+    applySnapshot(snapshot)
+  }, [applySnapshot])
+
+  const rejectPeriodUnlockAction = useCallback(async (requestId: string, rejectionReason: string, confirmation: ConfirmationMetadata) => {
+    const snapshot = await postAccountingAction<AccountingSnapshot>({ action: "rejectPeriodUnlock", requestId, rejectionReason, confirmation })
+    applySnapshot(snapshot)
+  }, [applySnapshot])
+
   const loadDemoDataAction = useCallback(async () => {
     const snapshot = await postAccountingAction<AccountingSnapshot>({ action: "loadDemoData" })
     applySnapshot(snapshot)
@@ -419,6 +459,8 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
     fixedAssets,
     depreciationSchedules,
     auditLogs,
+    accountingPeriods,
+    periodUnlockRequests,
     addJournalEntry,
     addDraftJournalEntry,
     updateDraftJournalEntry,
@@ -437,6 +479,11 @@ export function AccountingProvider({ children }: { children: ReactNode }) {
     postDepreciationSchedule: postDepreciationScheduleAction,
     previewPeriodClose: previewPeriodCloseAction,
     postPeriodClose: postPeriodCloseAction,
+    previewYearEndClose: previewYearEndCloseAction,
+    postYearEndClose: postYearEndCloseAction,
+    requestPeriodUnlock: requestPeriodUnlockAction,
+    approvePeriodUnlock: approvePeriodUnlockAction,
+    rejectPeriodUnlock: rejectPeriodUnlockAction,
     updateStockItem: updateStockItemAction,
     updateWarehouse: updateWarehouseAction,
     addOpeningStock: addOpeningStockAction,

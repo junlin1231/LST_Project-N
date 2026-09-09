@@ -5,7 +5,8 @@ from django.contrib import messages
 from django.contrib.auth import login
 from django.contrib.auth.tokens import default_token_generator
 from django.contrib.auth.views import LoginView, LogoutView
-from django.db.models import Count
+from django.db import DatabaseError, IntegrityError
+from django.db.models import Count, Q
 from django.http import Http404
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse_lazy
@@ -16,8 +17,25 @@ from django.utils.encoding import force_bytes
 from django.utils import timezone
 
 from .decorators import admin_required
-from .forms import AccessLoginForm, AccessRequestForm, InvitationForm, PasswordSetupForm, UserAccessForm
-from .models import AccessAuditLog, AccessRequest, Invitation, User
+from .forms import (
+    AccessLoginForm,
+    AccessRequestForm,
+    AccountingCompanyForm,
+    CompanyMembershipForm,
+    InvitationForm,
+    PasswordSetupForm,
+    UserAccessForm,
+)
+from .models import (
+    AccessAuditLog,
+    AccessRequest,
+    AccountingCompany,
+    AccountingCompanyMembership,
+    AccountingUser,
+    AccountingUserPreference,
+    Invitation,
+    User,
+)
 from .tokens import create_access_token
 
 
@@ -52,6 +70,43 @@ def password_setup_url(request, user):
     return request.build_absolute_uri(password_setup_path(user))
 
 
+def has_active_accounting_membership(user):
+    try:
+        accounting_user = AccountingUser.objects.filter(email=user.email.lower()).first()
+        if not accounting_user:
+            return False
+        return AccountingCompanyMembership.objects.filter(
+            user=accounting_user,
+            status=AccountingCompanyMembership.Status.ACTIVE,
+            company__status=AccountingCompany.Status.ACTIVE,
+        ).exists()
+    except DatabaseError:
+        return False
+
+
+def accounting_access_response(request, user, next_url=""):
+    if user.is_access_admin:
+        response = redirect("admin_dashboard")
+    elif has_active_accounting_membership(user):
+        response = redirect(_safe_next_url(next_url) or settings.ACCOUNTING_APP_URL)
+    else:
+        messages.error(request, "Your account is active, but an admin must assign you to a company before you can use the accounting system.")
+        response = redirect("pending_approval")
+        response.delete_cookie(settings.ACCESS_COOKIE_NAME, path="/")
+        return response
+
+    response.set_cookie(
+        settings.ACCESS_COOKIE_NAME,
+        create_access_token(user),
+        max_age=settings.ACCESS_COOKIE_MAX_AGE,
+        httponly=True,
+        secure=not settings.DEBUG,
+        samesite="Lax",
+        path="/",
+    )
+    return response
+
+
 def home(request):
     if not request.user.is_authenticated:
         return redirect("login")
@@ -70,22 +125,7 @@ class AccessLoginView(LoginView):
         user.save(update_fields=["last_login_at"])
         login(self.request, user)
         next_url = _safe_next_url(self.request.POST.get("next") or self.request.GET.get("next"))
-        if user.is_access_admin:
-            response = redirect("admin_dashboard")
-        elif next_url:
-            response = redirect(next_url)
-        else:
-            response = redirect(settings.ACCOUNTING_APP_URL)
-        response.set_cookie(
-            settings.ACCESS_COOKIE_NAME,
-            create_access_token(user),
-            max_age=settings.ACCESS_COOKIE_MAX_AGE,
-            httponly=True,
-            secure=not settings.DEBUG,
-            samesite="Lax",
-            path="/",
-        )
-        return response
+        return accounting_access_response(self.request, user, next_url)
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
@@ -119,17 +159,7 @@ def _login_and_redirect_with_access_cookie(request, user, next_url=""):
     user.last_login_at = timezone.now()
     user.save(update_fields=["last_login_at"])
     login(request, user)
-    response = redirect(_safe_next_url(next_url) or settings.ACCOUNTING_APP_URL)
-    response.set_cookie(
-        settings.ACCESS_COOKIE_NAME,
-        create_access_token(user),
-        max_age=settings.ACCESS_COOKIE_MAX_AGE,
-        httponly=True,
-        secure=not settings.DEBUG,
-        samesite="Lax",
-        path="/",
-    )
-    return response
+    return accounting_access_response(request, user, next_url)
 
 
 def setup_password(request, uidb64, token):
@@ -217,6 +247,141 @@ def users(request):
     users = User.objects.order_by("email")
     setup_links = {user.id: password_setup_url(request, user) for user in users if user.status in {User.Status.PENDING, User.Status.ACTIVE} and not user.has_usable_password()}
     return render(request, "access/users.html", {"users": users, "setup_links": setup_links})
+
+
+def _accounting_tables_unavailable_response(request):
+    return render(
+        request,
+        "access/accounting_unavailable.html",
+        {
+            "message": "Company management needs the admin panel DATABASE_URL to point at the accounting PostgreSQL database after accounting migrations have run."
+        },
+        status=503,
+    )
+
+
+def _accounting_user_role(access_user):
+    if access_user.role in {User.Role.ADMIN, User.Role.SUPER_ADMIN}:
+        return "admin"
+    return "user"
+
+
+def _ensure_accounting_user(access_user, company, sync_legacy_company=True):
+    name = access_user.get_full_name() or access_user.username or access_user.email
+    accounting_user, created = AccountingUser.objects.get_or_create(
+        email=access_user.email.lower(),
+        defaults={
+            "id": f"access-{access_user.id}",
+            "company": company,
+            "name": name,
+            "role": _accounting_user_role(access_user),
+        },
+    )
+    if not created:
+        changed = False
+        if sync_legacy_company and accounting_user.company_id != company.id:
+            accounting_user.company = company
+            changed = True
+        if accounting_user.name != name:
+            accounting_user.name = name
+            changed = True
+        next_role = _accounting_user_role(access_user)
+        if accounting_user.role != next_role:
+            accounting_user.role = next_role
+            changed = True
+        if changed:
+            accounting_user.save()
+    return accounting_user
+
+
+@admin_required
+def companies(request):
+    try:
+        search_query = request.GET.get("q", "").strip()
+        if request.method == "POST":
+            form = AccountingCompanyForm(request.POST)
+            if form.is_valid():
+                company = form.save()
+                messages.success(request, "Company created.")
+                return redirect("admin_company_detail", company_id=company.id)
+        else:
+            form = AccountingCompanyForm(initial={"base_currency": "MYR", "status": AccountingCompany.Status.ACTIVE})
+        companies_query = AccountingCompany.objects.all()
+        if search_query:
+            companies_query = companies_query.filter(
+                Q(name__icontains=search_query)
+                | Q(legal_name__icontains=search_query)
+                | Q(tax_id__icontains=search_query)
+                | Q(base_currency__icontains=search_query)
+                | Q(status__icontains=search_query)
+            )
+        company_list = list(companies_query)
+    except DatabaseError:
+        return _accounting_tables_unavailable_response(request)
+    return render(request, "access/companies.html", {"form": form, "companies": company_list, "search_query": search_query})
+
+
+@admin_required
+def company_detail(request, company_id):
+    try:
+        company = get_object_or_404(AccountingCompany, pk=company_id)
+        action = request.POST.get("action") if request.method == "POST" else ""
+        company_form = AccountingCompanyForm(
+            request.POST if action == "update_company" else None,
+            instance=company,
+            prefix="company",
+        )
+        membership_form = CompanyMembershipForm(
+            request.POST if action == "save_membership" else None,
+            prefix="membership",
+        )
+
+        if request.method == "POST":
+            if action == "update_company" and company_form.is_valid():
+                company_form.save()
+                messages.success(request, "Company updated.")
+                return redirect("admin_company_detail", company_id=company.id)
+            if action == "save_membership" and membership_form.is_valid():
+                access_user = User.objects.get(email=membership_form.cleaned_data["email"])
+                membership_status = membership_form.cleaned_data["status"]
+                accounting_user = _ensure_accounting_user(
+                    access_user,
+                    company,
+                    sync_legacy_company=membership_status == AccountingCompanyMembership.Status.ACTIVE,
+                )
+                AccountingCompanyMembership.objects.update_or_create(
+                    company=company,
+                    user=accounting_user,
+                    defaults={
+                        "role": membership_form.cleaned_data["role"],
+                        "status": membership_status,
+                        "invited_by": None,
+                    },
+                )
+                if membership_status == AccountingCompanyMembership.Status.ACTIVE:
+                    if accounting_user.company_id != company.id:
+                        accounting_user.company = company
+                        accounting_user.save()
+                    AccountingUserPreference.objects.update_or_create(
+                        user=accounting_user,
+                        defaults={"active_company": company},
+                    )
+                messages.success(request, "Company membership saved.")
+                return redirect("admin_company_detail", company_id=company.id)
+
+        memberships = list(AccountingCompanyMembership.objects.select_related("user").filter(company=company))
+    except (DatabaseError, IntegrityError):
+        return _accounting_tables_unavailable_response(request)
+    return render(
+        request,
+        "access/company_detail.html",
+        {
+            "company": company,
+            "company_form": company_form,
+            "membership_form": membership_form,
+            "memberships": memberships,
+        },
+    )
 
 
 @admin_required
