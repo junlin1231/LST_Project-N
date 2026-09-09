@@ -99,6 +99,18 @@ function accountIdByCode(accounts: { id: string; code: string; type: string }[],
   return accounts.find((account) => account.code === code)?.id ?? accounts.find((account) => account.type === fallbackType)?.id ?? accounts[0]?.id ?? ""
 }
 
+function accountNameByCode(accounts: { code: string; name: string }[], code: string) {
+  return accounts.find((account) => account.code === code)?.name ?? ""
+}
+
+function bankDebitAccountCode(transaction: NonNullable<NormalizedDocumentFields["bankTransactions"]>[number]) {
+  return transaction.debitAccountCode || (Number(transaction.moneyIn) > 0 ? "1010" : "5300")
+}
+
+function bankCreditAccountCode(transaction: NonNullable<NormalizedDocumentFields["bankTransactions"]>[number]) {
+  return transaction.creditAccountCode || (Number(transaction.moneyIn) > 0 ? "1200" : "1010")
+}
+
 function firstTextMatch(text: string, groups: Array<{ code: string; keywords: string[] }>) {
   const lower = text.toLowerCase()
   return groups.find((group) => group.keywords.some((keyword) => lower.includes(keyword)))?.code
@@ -182,6 +194,7 @@ export function DocumentsView() {
   const bankTransactions = fields.bankTransactions ?? []
   const bankMoneyIn = Number(bankTransactions.reduce((sum, transaction) => sum + Number(transaction.moneyIn), 0).toFixed(2))
   const bankMoneyOut = Number(bankTransactions.reduce((sum, transaction) => sum + Number(transaction.moneyOut), 0).toFixed(2))
+  const bankJournalTotal = Number(bankTransactions.reduce((sum, transaction) => sum + Math.max(Number(transaction.moneyIn), Number(transaction.moneyOut)), 0).toFixed(2))
   const isScanning = activeAction === "process" && !!processingDocumentId
   const isSelectedScanning = isScanning && selected?.id === processingDocumentId
   const totalDebit = Number(lines.reduce((sum, line) => sum + Number(line.debit), 0).toFixed(2))
@@ -380,6 +393,57 @@ export function DocumentsView() {
 
   function updateLine(index: number, changes: Partial<JournalLine>) {
     setLines((current) => current.map((line, lineIndex) => (lineIndex === index ? { ...line, ...changes } : line)))
+  }
+
+  function updateBankTransaction(index: number, changes: Partial<NonNullable<NormalizedDocumentFields["bankTransactions"]>[number]>) {
+    setFields((current) => ({
+      ...current,
+      bankTransactions: (current.bankTransactions ?? []).map((transaction, transactionIndex) => (
+        transactionIndex === index ? { ...transaction, ...changes } : transaction
+      )),
+    }))
+  }
+
+  function updateBankTransactionAccount(index: number, side: "debit" | "credit", code: string) {
+    const name = accountNameByCode(accounts, code)
+    updateBankTransaction(index, side === "debit"
+      ? { debitAccountCode: code, debitAccountName: name }
+      : { creditAccountCode: code, creditAccountName: name })
+  }
+
+  function updateBankTransactionAmount(index: number, amount: number) {
+    const transaction = bankTransactions[index]
+    const value = Math.max(0, amount)
+    updateBankTransaction(index, transaction?.moneyIn
+      ? { moneyIn: value, moneyOut: 0 }
+      : { moneyIn: 0, moneyOut: value })
+  }
+
+  function addBankJournalTransaction() {
+    setFields((current) => ({
+      ...current,
+      bankTransactions: [
+        ...(current.bankTransactions ?? []),
+        {
+          date: current.documentDate || new Date().toISOString().slice(0, 10),
+          description: "",
+          reference: "",
+          moneyIn: 0,
+          moneyOut: 0,
+          debitAccountCode: "5300",
+          debitAccountName: accountNameByCode(accounts, "5300") || "General Expenses",
+          creditAccountCode: "1010",
+          creditAccountName: accountNameByCode(accounts, "1010") || "Cash / Bank",
+        },
+      ],
+    }))
+  }
+
+  function removeBankJournalTransaction(index: number) {
+    setFields((current) => ({
+      ...current,
+      bankTransactions: (current.bankTransactions ?? []).filter((_, transactionIndex) => transactionIndex !== index),
+    }))
   }
 
   function updateItem(index: number, changes: Partial<NormalizedDocumentFields["lineItems"][number]>) {
@@ -757,7 +821,7 @@ export function DocumentsView() {
                       <Summary label="Money Out" value={bankMoneyOut} />
                     </div>
                     <div className="overflow-hidden rounded-md border border-border">
-                      <div className="max-h-[30rem] overflow-y-auto">
+                      <div className="max-h-[30rem] overflow-auto">
                         <div className="sticky top-0 z-10 hidden grid-cols-[7rem_minmax(14rem,1fr)_9rem_8rem_8rem] gap-2 border-b border-border bg-muted px-3 py-2 text-xs font-medium text-muted-foreground lg:grid">
                           <span>Date</span>
                           <span>Description</span>
@@ -806,42 +870,97 @@ export function DocumentsView() {
                   </TabsContent>
 
                   <TabsContent value="journal" className="mt-4 space-y-3">
-                    <div className="flex items-center justify-between">
-                      <h3 className="text-sm font-semibold">Suggested Journal Entry</h3>
-                      <Button variant="outline" size="sm" onClick={() => setLines((current) => [...current, { accountId: accounts[0]?.id ?? "", debit: 0, credit: 0 }])}>Add Line</Button>
-                    </div>
-                    <div className="overflow-hidden rounded-md border border-border">
-                      <div className="hidden grid-cols-[minmax(12rem,1fr)_8rem_8rem_3rem] gap-2 border-b border-border bg-muted/40 px-3 py-2 text-xs font-medium text-muted-foreground md:grid">
-                        <span>Account</span>
-                        <span className="text-right">Debit</span>
-                        <span className="text-right">Credit</span>
-                        <span />
-                      </div>
-                      {lines.length === 0 ? (
-                        <div className="p-4 text-sm text-muted-foreground">Choose a posting option or add journal lines manually.</div>
-                      ) : lines.map((line, index) => (
-                        <div key={index} className="grid gap-3 border-b border-border p-3 last:border-b-0 md:grid-cols-[minmax(12rem,1fr)_8rem_8rem_3rem] md:items-end md:gap-2">
-                          <JournalField label="Account">
-                            <select className="h-10 min-w-0 rounded-md border border-input bg-background px-3 text-sm" value={line.accountId} onChange={(event) => updateLine(index, { accountId: event.target.value })}>
-                              {accounts.map((account) => <option key={account.id} value={account.id}>{account.code} - {account.name}</option>)}
-                            </select>
-                          </JournalField>
-                          <JournalField label="Debit">
-                            <Input inputMode="decimal" className="text-right font-mono text-debit" value={line.debit} onChange={(event) => updateLine(index, { debit: toNumber(event.target.value), credit: toNumber(event.target.value) > 0 ? 0 : line.credit })} />
-                          </JournalField>
-                          <JournalField label="Credit">
-                            <Input inputMode="decimal" className="text-right font-mono text-credit" value={line.credit} onChange={(event) => updateLine(index, { credit: toNumber(event.target.value), debit: toNumber(event.target.value) > 0 ? 0 : line.debit })} />
-                          </JournalField>
-                          <Button variant="ghost" size="icon" aria-label="Remove journal line" onClick={() => setLines((current) => current.filter((_, lineIndex) => lineIndex !== index))}><X className="size-4" /></Button>
+                    {bankTransactions.length > 0 ? (
+                      <>
+                        <div className="flex items-center justify-between">
+                          <h3 className="text-sm font-semibold">Bank Journal Preview</h3>
+                          <div className="flex items-center gap-2">
+                            <Badge variant="outline">{bankTransactions.length} entries</Badge>
+                            <Button variant="outline" size="sm" onClick={addBankJournalTransaction}>Add Entry</Button>
+                          </div>
                         </div>
-                      ))}
-                    </div>
-                    <div className="grid gap-3 sm:grid-cols-3">
-                      <Summary label="Total Debit" value={totalDebit} />
-                      <Summary label="Total Credit" value={totalCredit} />
-                      <Summary label={journalDifference === 0 ? "Balanced" : "Difference"} value={journalDifference} />
-                    </div>
-                    <p className="text-xs text-muted-foreground">Account names use current chart of accounts. Example: {lines[0] ? accountName(lines[0].accountId) : "No account selected"}.</p>
+                        <div className="max-h-[32rem] space-y-3 overflow-auto pr-1">
+                          {bankTransactions.map((transaction, index) => {
+                            const amount = Math.max(Number(transaction.moneyIn), Number(transaction.moneyOut))
+                            return (
+                              <div key={`${transaction.date}-${index}`} className="rounded-md border border-border">
+                                <div className="grid gap-2 border-b border-border bg-muted/30 px-3 py-2 text-sm md:grid-cols-[8rem_minmax(12rem,1fr)_10rem_3rem] md:items-center">
+                                  <Input type="date" value={transaction.date} onChange={(event) => updateBankTransaction(index, { date: event.target.value })} />
+                                  <Input value={transaction.description} placeholder="Transaction description" onChange={(event) => updateBankTransaction(index, { description: event.target.value })} />
+                                  <Input value={transaction.reference ?? ""} placeholder={fields.documentNumber || `Row ${index + 1}`} onChange={(event) => updateBankTransaction(index, { reference: event.target.value })} />
+                                  <Button variant="ghost" size="icon" aria-label="Remove bank journal entry" onClick={() => removeBankJournalTransaction(index)}><X className="size-4" /></Button>
+                                </div>
+                                <div className="hidden grid-cols-[minmax(14rem,1fr)_8rem_8rem] gap-2 border-b border-border px-3 py-2 text-xs font-medium text-muted-foreground md:grid">
+                                  <span>Account</span>
+                                  <span className="text-right">Debit</span>
+                                  <span className="text-right">Credit</span>
+                                </div>
+                                <div className="grid gap-2 border-b border-border px-3 py-2 text-sm last:border-b-0 md:grid-cols-[minmax(14rem,1fr)_8rem_8rem] md:items-center">
+                                  <select className="h-10 min-w-0 rounded-md border border-input bg-background px-3 text-sm" value={bankDebitAccountCode(transaction)} onChange={(event) => updateBankTransactionAccount(index, "debit", event.target.value)}>
+                                    <option value="">Select account</option>
+                                    {accounts.map((account) => <option key={account.id} value={account.code}>{account.code} - {account.name}</option>)}
+                                  </select>
+                                  <Input inputMode="decimal" className="text-right font-mono text-debit" value={amount} onChange={(event) => updateBankTransactionAmount(index, toNumber(event.target.value))} />
+                                  <span className="text-right text-muted-foreground">-</span>
+                                </div>
+                                <div className="grid gap-2 px-3 py-2 text-sm md:grid-cols-[minmax(14rem,1fr)_8rem_8rem] md:items-center">
+                                  <select className="h-10 min-w-0 rounded-md border border-input bg-background px-3 text-sm" value={bankCreditAccountCode(transaction)} onChange={(event) => updateBankTransactionAccount(index, "credit", event.target.value)}>
+                                    <option value="">Select account</option>
+                                    {accounts.map((account) => <option key={account.id} value={account.code}>{account.code} - {account.name}</option>)}
+                                  </select>
+                                  <span className="text-right text-muted-foreground">-</span>
+                                  <span className="text-right"><Amount value={amount} /></span>
+                                </div>
+                              </div>
+                            )
+                          })}
+                        </div>
+                        <div className="grid gap-3 sm:grid-cols-3">
+                          <Summary label="Total Debit" value={bankJournalTotal} />
+                          <Summary label="Total Credit" value={bankJournalTotal} />
+                          <Summary label="Balanced" value={0} />
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div className="flex items-center justify-between">
+                          <h3 className="text-sm font-semibold">Suggested Journal Entry</h3>
+                          <Button variant="outline" size="sm" onClick={() => setLines((current) => [...current, { accountId: accounts[0]?.id ?? "", debit: 0, credit: 0 }])}>Add Line</Button>
+                        </div>
+                        <div className="overflow-hidden rounded-md border border-border">
+                          <div className="hidden grid-cols-[minmax(12rem,1fr)_8rem_8rem_3rem] gap-2 border-b border-border bg-muted/40 px-3 py-2 text-xs font-medium text-muted-foreground md:grid">
+                            <span>Account</span>
+                            <span className="text-right">Debit</span>
+                            <span className="text-right">Credit</span>
+                            <span />
+                          </div>
+                          {lines.length === 0 ? (
+                            <div className="p-4 text-sm text-muted-foreground">Choose a posting option or add journal lines manually.</div>
+                          ) : lines.map((line, index) => (
+                            <div key={index} className="grid gap-3 border-b border-border p-3 last:border-b-0 md:grid-cols-[minmax(12rem,1fr)_8rem_8rem_3rem] md:items-end md:gap-2">
+                              <JournalField label="Account">
+                                <select className="h-10 min-w-0 rounded-md border border-input bg-background px-3 text-sm" value={line.accountId} onChange={(event) => updateLine(index, { accountId: event.target.value })}>
+                                  {accounts.map((account) => <option key={account.id} value={account.id}>{account.code} - {account.name}</option>)}
+                                </select>
+                              </JournalField>
+                              <JournalField label="Debit">
+                                <Input inputMode="decimal" className="text-right font-mono text-debit" value={line.debit} onChange={(event) => updateLine(index, { debit: toNumber(event.target.value), credit: toNumber(event.target.value) > 0 ? 0 : line.credit })} />
+                              </JournalField>
+                              <JournalField label="Credit">
+                                <Input inputMode="decimal" className="text-right font-mono text-credit" value={line.credit} onChange={(event) => updateLine(index, { credit: toNumber(event.target.value), debit: toNumber(event.target.value) > 0 ? 0 : line.debit })} />
+                              </JournalField>
+                              <Button variant="ghost" size="icon" aria-label="Remove journal line" onClick={() => setLines((current) => current.filter((_, lineIndex) => lineIndex !== index))}><X className="size-4" /></Button>
+                            </div>
+                          ))}
+                        </div>
+                        <div className="grid gap-3 sm:grid-cols-3">
+                          <Summary label="Total Debit" value={totalDebit} />
+                          <Summary label="Total Credit" value={totalCredit} />
+                          <Summary label={journalDifference === 0 ? "Balanced" : "Difference"} value={journalDifference} />
+                        </div>
+                        <p className="text-xs text-muted-foreground">Account names use current chart of accounts. Example: {lines[0] ? accountName(lines[0].accountId) : "No account selected"}.</p>
+                      </>
+                    )}
                   </TabsContent>
                 </Tabs>
               </div>

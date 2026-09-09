@@ -83,6 +83,7 @@ async function seedDefaultRuleAccounts(db: DbExecutor) {
     { code: "1010", name: "Cash / Bank", type: "asset" },
     { code: "4000", name: "Sales Revenue", type: "revenue" },
     { code: "2100", name: "Tax Payable", type: "liability" },
+    { code: "2150", name: "Statutory Payables", type: "liability" },
     { code: "5300", name: "General Expenses", type: "expense" },
     { code: "2000", name: "Accounts Payable", type: "liability" },
     { code: "5000", name: "Rent Expense", type: "expense" },

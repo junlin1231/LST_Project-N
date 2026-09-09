@@ -25,7 +25,7 @@ import { currentCompanyId, currentUserId, insertJournalEntry } from "./accountin
 import { ensureDatabaseReady, query, transaction, type DbExecutor } from "./db"
 import { categorizationAdapter } from "./categorization-adapter"
 import { ocrAdapter, type OcrResult } from "./ocr-adapter"
-import { getActiveRuleConfig } from "./accounting-rule-service"
+import { accountIdForCode, getActiveRuleConfig } from "./accounting-rule-service"
 import { countPdfPages, splitPdfIntoPageImages } from "./pdf-splitter"
 import { splitImageIntoReceipts, splitImageIntoVerticalSections } from "./receipt-splitter"
 import { documentStorageRoot, resolveStoredDocumentPath } from "./document-storage"
@@ -135,11 +135,22 @@ function mapDocument(row: DocumentRow): OcrDocument {
   }
 }
 
+function sanitizeBankTransactionDescriptions<T extends Partial<NormalizedDocumentFields>>(fields: T): T {
+  if (!Array.isArray(fields.bankTransactions)) return fields
+  return {
+    ...fields,
+    bankTransactions: fields.bankTransactions.map((transaction) => ({
+      ...transaction,
+      description: cleanBankTransactionDescription(transaction.description ?? ""),
+    })).filter((transaction) => transaction.description),
+  }
+}
+
 function mapExtraction(row?: ExtractionRow): DocumentExtraction | undefined {
   if (!row) return undefined
   return {
     rawText: row.raw_text,
-    extractedFields: row.extracted_fields ?? {},
+    extractedFields: sanitizeBankTransactionDescriptions(row.extracted_fields ?? {}),
     ocrEngine: row.ocr_engine,
     ocrConfidence: row.ocr_confidence === null ? undefined : Number(row.ocr_confidence),
     status: row.status,
@@ -167,7 +178,7 @@ function mapDraft(row?: DraftRow): DocumentAccountingDraft | undefined {
   return {
     id: row.id,
     draftType: row.draft_type,
-    normalizedFields: row.normalized_fields,
+    normalizedFields: sanitizeBankTransactionDescriptions(row.normalized_fields),
     suggestedJournalLines: row.suggested_journal_lines ?? [],
     status: row.status,
     journalEntryId: row.journal_entry_id ?? undefined,
@@ -681,6 +692,25 @@ function validatePaymentMethod(value: unknown) {
   return "other"
 }
 
+function cleanBankTransactionDescription(value: string) {
+  const markers = [
+    /\bBaki Harian\b/i,
+    /\bDaily And Closing Balances\b/i,
+    /\bTerima Kasih\b/i,
+    /\bThank You For Banking\b/i,
+    /\bPERHATIAN\s*\/\s*ATTENTION\b/i,
+    /\bPenyata ini dicetak\b/i,
+    /\bThis is a computer generated statement\b/i,
+    /\bProtected by PIDM\b/i,
+    /\bDilindungi oleh PIDM\b/i,
+  ]
+  const firstMarker = markers.reduce((position, marker) => {
+    const match = value.match(marker)
+    return match?.index === undefined ? position : Math.min(position, match.index)
+  }, value.length)
+  return value.slice(0, firstMarker).replace(/\s+/g, " ").trim()
+}
+
 function validateFields(input: NormalizedDocumentFields): NormalizedDocumentFields {
   const subtotal = Number(input.subtotal)
   const otherCharges = Number(input.otherCharges ?? 0)
@@ -727,12 +757,17 @@ function validateFields(input: NormalizedDocumentFields): NormalizedDocumentFiel
 function validateBankTransactions(input: BankStatementTransaction[]) {
   return input.flatMap((transaction) => {
     const date = String(transaction.date ?? "").trim()
-    const description = String(transaction.description ?? "").trim()
+    const description = cleanBankTransactionDescription(String(transaction.description ?? ""))
     const reference = String(transaction.reference ?? "").trim()
     const moneyIn = Number(transaction.moneyIn ?? 0)
     const moneyOut = Number(transaction.moneyOut ?? 0)
     const balance = transaction.balance === undefined ? undefined : Number(transaction.balance)
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !description || (!moneyIn && !moneyOut)) return []
+    const isMoneyIn = moneyIn > 0
+    const debitAccountCode = String(transaction.debitAccountCode ?? (isMoneyIn ? "1010" : "5300")).trim()
+    const debitAccountName = String(transaction.debitAccountName ?? "").trim()
+    const creditAccountCode = String(transaction.creditAccountCode ?? (isMoneyIn ? "1200" : "1010")).trim()
+    const creditAccountName = String(transaction.creditAccountName ?? "").trim()
     return [{
       date,
       description,
@@ -740,6 +775,10 @@ function validateBankTransactions(input: BankStatementTransaction[]) {
       moneyIn: Number((Number.isFinite(moneyIn) ? Math.max(0, moneyIn) : 0).toFixed(2)),
       moneyOut: Number((Number.isFinite(moneyOut) ? Math.max(0, moneyOut) : 0).toFixed(2)),
       balance: balance !== undefined && Number.isFinite(balance) ? Number(balance.toFixed(2)) : undefined,
+      debitAccountCode: debitAccountCode || undefined,
+      debitAccountName: debitAccountName || undefined,
+      creditAccountCode: creditAccountCode || undefined,
+      creditAccountName: creditAccountName || undefined,
     }]
   })
 }
@@ -751,7 +790,11 @@ function validateJournalLines(lines: JournalLine[], date: string) {
   return normalized
 }
 
-function buildBankStatementJournalEntries(input: {
+async function bankAccountIdForCode(code: string | undefined, fallbackAccountId: string) {
+  return code ? accountIdForCode(code, fallbackAccountId) : fallbackAccountId
+}
+
+async function buildBankStatementJournalEntries(input: {
   documentId: string
   originalFilename: string
   documentNumber?: string
@@ -762,25 +805,24 @@ function buildBankStatementJournalEntries(input: {
     expenseAccountId: string
   }
 }) {
-  return input.bankTransactions.map((bankTransaction, index): JournalEntry => {
+  return Promise.all(input.bankTransactions.map(async (bankTransaction, index): Promise<JournalEntry> => {
     const amount = Number((bankTransaction.moneyIn > 0 ? bankTransaction.moneyIn : bankTransaction.moneyOut).toFixed(2))
     const isMoneyIn = bankTransaction.moneyIn > 0
+    const defaultDebitAccountId = isMoneyIn ? input.accounts.cashAccountId : input.accounts.expenseAccountId
+    const defaultCreditAccountId = isMoneyIn ? input.accounts.revenueAccountId : input.accounts.cashAccountId
+    const debitAccountId = await bankAccountIdForCode(bankTransaction.debitAccountCode, defaultDebitAccountId)
+    const creditAccountId = await bankAccountIdForCode(bankTransaction.creditAccountCode, defaultCreditAccountId)
     return {
       id: `je-${randomUUID()}`,
       date: bankTransaction.date,
       reference: bankTransaction.reference || input.documentNumber || `${input.documentId}-${index + 1}`,
       description: `Bank ${isMoneyIn ? "money in" : "money out"} - ${bankTransaction.description}`,
-      lines: isMoneyIn
-        ? [
-            { accountId: input.accounts.cashAccountId, debit: amount, credit: 0 },
-            { accountId: input.accounts.revenueAccountId, debit: 0, credit: amount },
-          ]
-        : [
-            { accountId: input.accounts.expenseAccountId, debit: amount, credit: 0 },
-            { accountId: input.accounts.cashAccountId, debit: 0, credit: amount },
-          ],
+      lines: [
+        { accountId: debitAccountId, debit: amount, credit: 0 },
+        { accountId: creditAccountId, debit: 0, credit: amount },
+      ],
     }
-  })
+  }))
 }
 
 export async function updateDocumentDraft(id: string, input: { category: unknown; normalizedFields: NormalizedDocumentFields; suggestedJournalLines: JournalLine[] }) {
@@ -863,7 +905,7 @@ export async function postConfirmedDocument(id: string) {
   try {
     if (detail.draft.draftType === "bank_document" && bankTransactions.length > 0) {
       const config = await getActiveRuleConfig()
-      const journalEntries = buildBankStatementJournalEntries({
+      const journalEntries = await buildBankStatementJournalEntries({
         documentId: id,
         originalFilename: detail.originalFilename,
         documentNumber: fields.documentNumber,

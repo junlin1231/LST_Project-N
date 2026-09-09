@@ -56,6 +56,10 @@ export interface BankStatementTransaction {
   moneyIn: number
   moneyOut: number
   balance?: number
+  debitAccountCode?: string
+  debitAccountName?: string
+  creditAccountCode?: string
+  creditAccountName?: string
 }
 
 export interface NormalizedDocumentFields {

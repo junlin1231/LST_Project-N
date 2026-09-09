@@ -56,6 +56,7 @@ function normalizeLabel(value: unknown) {
 
 export async function ensureDocumentMasterData() {
   await ensureDatabaseReady()
+  const companyId = currentCompanyId()
   await transaction(async (client) => {
     await exec(
       client,
@@ -83,7 +84,7 @@ export async function ensureDocumentMasterData() {
         `INSERT INTO document_master_data_options (id, company_id, option_type, value, label, is_active, sort_order)
          VALUES ($1, $2, $3, $4, $5, $6, $7)
          ON CONFLICT (company_id, option_type, value) DO NOTHING`,
-        [option.id, currentCompanyId(), option.type, option.value, option.label, option.isActive, option.sortOrder],
+        [`${companyId}-${option.id}`, companyId, option.type, option.value, option.label, option.isActive, option.sortOrder],
       )
     }
   })

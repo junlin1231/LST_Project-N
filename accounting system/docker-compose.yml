@@ -2,7 +2,7 @@ services:
   db:
     image: postgres:17-alpine
     env_file:
-      - .env
+      - .env.local
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -16,7 +16,7 @@ services:
       context: .
       dockerfile: Dockerfile
     env_file:
-      - .env
+      - .env.local
     ports:
       - '3000:3000'
     environment:
@@ -35,7 +35,7 @@ services:
       context: ../admin_panel
       dockerfile: Dockerfile
     env_file:
-      - .env
+      - .env.local
     ports:
       - '8000:8000'
     depends_on:

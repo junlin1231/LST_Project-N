@@ -352,11 +352,125 @@ function isBalanceLine(value: string) {
   return /\b(balance\s+(?:from last statement|b\/f|c\/f)|closing balance)\b/i.test(value)
 }
 
+function isBankStatementBoilerplate(value: string) {
+  return /\b(?:penyata ini dicetak|computer generated statement|no signature is required|tandatangan tidak diperlukan)\b/i.test(value)
+    || /\b(?:public bank berhad|public bank|ipoh main office|jln dato maharajalela|perak darul ridzuan)\b/i.test(value)
+    || /\b(?:nombor akaun|account number|tarikh penyata|statement date|muka surat|page no\.?|tel:|fax:)\b/i.test(value)
+    || /\b(?:pendeposit|depositor)\b/i.test(value)
+    || /\b(?:baki harian|daily and closing balances|terima kasih|thank you for banking|privacy notice|notis privasi|perhatian|attention|anti-bribery|anti-corruption|anti-rasuah|anti-sogokan)\b/i.test(value)
+}
+
+function looksLikeStatementProse(value: string) {
+  const words = value.match(/[A-Za-z]{3,}/g) ?? []
+  if (words.length < 6) return false
+  const titleCaseWords = words.filter((word) => /^[A-Z][a-z]+$/.test(word)).length
+  const lowerCaseWords = words.filter((word) => /^[a-z]+$/.test(word)).length
+  const transactionTokens = value.match(/\b[A-Z0-9]{4,}\b/g) ?? []
+  return transactionTokens.length === 0 && (value.includes(".") || titleCaseWords + lowerCaseWords >= 6)
+}
+
+function isLikelyBankTransactionContinuation(value: string) {
+  if (isBankStatementBoilerplate(value) || isBalanceLine(value) || looksLikeStatementProse(value)) return false
+  if (/\b(?:date|transaction|debit|credit|balance|tarikh|urus niaga)\b/i.test(value)) return false
+  if (/^\d+\s*(?:\/\s*\d+)?$/.test(value)) return false
+  const hasReferenceToken = /\b[A-Z0-9]{4,}\b/.test(value)
+  const hasTransactionKeyword = /\b(?:invoice|inv|ref|date|fpx|duitnow|giro|jomp?ay|lhdn|hasil|epf|kwsp|socso|perkeso|bill|payment|pymt|transfer|tsfr|name|beneficiary|recipient)\b/i.test(value)
+  return hasReferenceToken || hasTransactionKeyword
+}
+
+function cleanBankTransactionDescription(value: string) {
+  const markers = [
+    /\bBaki Harian\b/i,
+    /\bDaily And Closing Balances\b/i,
+    /\bTerima Kasih\b/i,
+    /\bThank You For Banking\b/i,
+    /\bPERHATIAN\s*\/\s*ATTENTION\b/i,
+    /\bPenyata ini dicetak\b/i,
+    /\bThis is a computer generated statement\b/i,
+  ]
+  const firstMarker = markers.reduce((position, marker) => {
+    const match = value.match(marker)
+    return match?.index === undefined ? position : Math.min(position, match.index)
+  }, value.length)
+  return value.slice(0, firstMarker).replace(/\s+/g, " ").trim()
+}
+
+function bankStatementTableHeader(value: string) {
+  return /\b(?:tarikh\s+urus\s+niaga|date\s+transaction)\b/i.test(value)
+}
+
+function bankStatementEndMarker(value: string) {
+  return /\b(?:closing balance|balance\s+c\/f)\b/i.test(value)
+}
+
+function hasTransactionContinuationIndent(value: string) {
+  const leadingSpaces = value.match(/^\s*/)?.[0].length ?? 0
+  return leadingSpaces >= 8
+}
+
 function directionFromTransaction(description: string, amountColumn: "left" | "right") {
   const lower = description.toLowerCase()
   if (/\b(?:dep|cr|credit)\b/.test(lower) || lower.includes("trsf cr")) return "in"
   if (/\b(?:dr|debit|giro pymt|jompay|fpx)\b/.test(lower) || lower.includes("trsf dr") || lower.includes("fund dr")) return "out"
   return amountColumn === "right" ? "in" : "out"
+}
+
+function bankAccountSuggestion(code: string) {
+  const names: Record<string, string> = {
+    "1010": "Cash / Bank",
+    "1200": "Trade Receivables",
+    "2000": "Accounts Payable",
+    "2150": "Statutory Payables",
+    "4000": "Sales Revenue",
+    "5000": "Rent Expense",
+    "5100": "Salary Expense",
+    "5200": "Utilities Expense",
+    "5300": "General Expenses",
+    "5400": "Marketing Expense",
+    "5500": "Software Subscriptions",
+    "5600": "Cost of Goods Sold",
+    "5800": "Meals and Entertainment",
+    "5900": "Travel Expense",
+    "5950": "Fuel and Transport Expense",
+  }
+  return { code, name: names[code] ?? "General Expenses" }
+}
+
+function inferBankTransactionAccounts(description: string, direction: "in" | "out") {
+  const lower = description.toLowerCase()
+  if (direction === "in") {
+    const credit = /\b(?:interest|hibah)\b/.test(lower)
+      ? bankAccountSuggestion("4000")
+      : bankAccountSuggestion("1200")
+    return {
+      debit: bankAccountSuggestion("1010"),
+      credit,
+    }
+  }
+
+  const debit = /\b(?:lhdn|hasil|tax|sst|pcb|epf|kwsp|socso|perkeso|eis|sip)\b/.test(lower)
+    ? bankAccountSuggestion("2150")
+    : /\b(?:salary|payroll|wage|gaji)\b/.test(lower)
+      ? bankAccountSuggestion("5100")
+      : /\b(?:tnb|electric|electricity|water|telekom|internet|utility|utilities)\b/.test(lower)
+        ? bankAccountSuggestion("5200")
+        : /\b(?:rent|rental|lease)\b/.test(lower)
+          ? bankAccountSuggestion("5000")
+          : /\b(?:fuel|petrol|diesel|parking|toll|grab|taxi|transport|courier|logistic)\b/.test(lower)
+            ? bankAccountSuggestion("5950")
+            : /\b(?:meal|restaurant|cafe|coffee|food|entertainment)\b/.test(lower)
+              ? bankAccountSuggestion("5800")
+              : /\b(?:software|subscription|saas|cloud|hosting|domain)\b/.test(lower)
+                ? bankAccountSuggestion("5500")
+                : /\b(?:marketing|advertising|promotion|facebook|google ads)\b/.test(lower)
+                  ? bankAccountSuggestion("5400")
+                  : /\b(?:supplier|vendor|payable)\b/.test(lower)
+                    ? bankAccountSuggestion("2000")
+                    : bankAccountSuggestion("5300")
+  return {
+    debit,
+    credit: bankAccountSuggestion("1010"),
+  }
 }
 
 function inferBankTransactionsFromText(rawText: string): BankStatementTransaction[] | undefined {
@@ -373,22 +487,49 @@ function inferBankTransactionsFromText(rawText: string): BankStatementTransactio
   let currentDate = ""
   let current: BankStatementTransaction | null = null
   const transactions: BankStatementTransaction[] = []
+  let inTransactionTable = false
 
   function pushCurrent() {
     if (current && !isBalanceLine(current.description) && (current.moneyIn > 0 || current.moneyOut > 0)) {
-      current.description = current.description.replace(/\s+/g, " ").trim()
-      transactions.push(current)
+      current.description = cleanBankTransactionDescription(current.description)
+      if (current.description) transactions.push(current)
     }
     current = null
   }
 
-  for (const line of rawText.split(/\r?\n/)) {
+  for (const rawLine of rawText.split(/\r?\n/)) {
+    const hadPageBreak = rawLine.includes("\f")
+    const line = hadPageBreak ? rawLine.slice(rawLine.lastIndexOf("\f") + 1) : rawLine
+    if (hadPageBreak) {
+      pushCurrent()
+      inTransactionTable = false
+    }
+
+    const trimmedLine = line.trim()
+    if (bankStatementTableHeader(trimmedLine)) {
+      pushCurrent()
+      inTransactionTable = true
+      continue
+    }
+
+    if (!inTransactionTable) continue
+
     const dateMatch = line.match(/^\s*(\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?)\s+(.*)$/)
     const lineDate = dateMatch ? statementDateWithDefaultYear(dateMatch[1], fallbackYear) : ""
     if (lineDate) currentDate = lineDate
 
     const content = (dateMatch?.[2] ?? line).trim()
     if (!content || /^(date|transaction|debit|credit|balance|tarikh|urus niaga)$/i.test(content)) continue
+    if (bankStatementEndMarker(content)) {
+      pushCurrent()
+      if (/closing balance/i.test(content)) inTransactionTable = false
+      continue
+    }
+    if (isBankStatementBoilerplate(content)) {
+      pushCurrent()
+      inTransactionTable = false
+      continue
+    }
 
     const amountMatches = [...line.matchAll(/\b(?:RM\s*)?\d{1,3}(?:,\d{3})*(?:\.\d{2})\b/g)]
     if (amountMatches.length >= 2 && currentDate) {
@@ -401,17 +542,22 @@ function inferBankTransactionsFromText(rawText: string): BankStatementTransactio
       const description = line.slice(dateMatch ? (dateMatch.index ?? 0) + dateMatch[1].length : 0, beforeAmount).replace(/\s+/g, " ").trim()
       const amountColumn = beforeAmount > 100 ? "right" : "left"
       const direction = directionFromTransaction(description, amountColumn)
+      const accounts = inferBankTransactionAccounts(description, direction)
       current = {
         date: currentDate,
         description,
         moneyIn: direction === "in" ? Number(amount.toFixed(2)) : 0,
         moneyOut: direction === "out" ? Number(amount.toFixed(2)) : 0,
         balance: Number(balance.toFixed(2)),
+        debitAccountCode: accounts.debit.code,
+        debitAccountName: accounts.debit.name,
+        creditAccountCode: accounts.credit.code,
+        creditAccountName: accounts.credit.name,
       }
       continue
     }
 
-    if (current && !isBalanceLine(content) && !dateMatch && !amountMatches.length) {
+    if (current && !dateMatch && !amountMatches.length && hasTransactionContinuationIndent(line) && isLikelyBankTransactionContinuation(content)) {
       current.description = `${current.description} ${content}`.trim()
     }
   }
@@ -476,11 +622,14 @@ function normalizeBankTransactions(value: unknown): BankStatementTransaction[] |
     const record = item && typeof item === "object" ? item as Record<string, unknown> : null
     if (!record) return []
     const date = dateValue(record.date)
-    const description = optionalStringValue(record.description || record.transactionDetails || record.details)
+    const description = cleanBankTransactionDescription(optionalStringValue(record.description || record.transactionDetails || record.details))
     const moneyIn = numberValue(record.moneyIn ?? record.inflow ?? record.credit, 0)
     const moneyOut = numberValue(record.moneyOut ?? record.outflow ?? record.debit, 0)
     const balance = numberValue(record.balance, NaN)
     if (!date || !description || (moneyIn <= 0 && moneyOut <= 0)) return []
+    const suggestedAccounts = inferBankTransactionAccounts(description, moneyIn > 0 ? "in" : "out")
+    const debitAccountCode = optionalStringValue(record.debitAccountCode ?? record.debitAccount ?? record.debit_account_code) || suggestedAccounts.debit.code
+    const creditAccountCode = optionalStringValue(record.creditAccountCode ?? record.creditAccount ?? record.credit_account_code) || suggestedAccounts.credit.code
     return [{
       date,
       description,
@@ -488,6 +637,10 @@ function normalizeBankTransactions(value: unknown): BankStatementTransaction[] |
       moneyIn: Number(moneyIn.toFixed(2)),
       moneyOut: Number(moneyOut.toFixed(2)),
       balance: Number.isFinite(balance) ? Number(balance.toFixed(2)) : undefined,
+      debitAccountCode,
+      debitAccountName: optionalStringValue(record.debitAccountName ?? record.debit_account_name) || bankAccountSuggestion(debitAccountCode).name,
+      creditAccountCode,
+      creditAccountName: optionalStringValue(record.creditAccountName ?? record.credit_account_name) || bankAccountSuggestion(creditAccountCode).name,
     }]
   })
   return transactions.length > 0 ? transactions : undefined
@@ -519,7 +672,9 @@ async function extractWithGemmaEndpoint(input: { filePath: string; mimeType: str
     "Return only one JSON object with these keys:",
     "rawText, documentDate, dueDate, documentNumber, currency, vendorName, clientName, taxId, subtotal, otherCharges, taxAmount, totalAmount, paymentMethod, lineItems, bankTransactions, warnings.",
     "For bank statements, keep rawText short and do not combine rows into one total.",
-    "For bank statements, also return bankTransactions as an array of every table row with: date, description, reference, moneyIn, moneyOut, balance.",
+    "For bank statements, also return bankTransactions as an array of every table row with: date, description, reference, moneyIn, moneyOut, balance, debitAccountCode, debitAccountName, creditAccountCode, creditAccountName.",
+    "For each bank statement row, choose debit and credit account codes from the chart pattern: 1010 Bank/Current Account, 1200 Accounts Receivable, 2000 Accounts Payable, 2150 Statutory Payables, 4000 Revenue, 5000 Rent Expense, 5100 Salary Expense, 5200 Utilities Expense, 5300 General Expenses, 5400 Marketing Expense, 5500 Software Subscriptions, 5600 Cost of Goods Sold, 5800 Meals and Entertainment, 5900 Travel Expense, 5950 Fuel and Transport Expense.",
+    "For money-in rows, debit the bank account and credit receivables or revenue. For money-out rows, debit the specific expense/payable/statutory account and credit the bank account.",
     "For bank statements, use totalAmount 0 and lineItems [] unless the statement has one single transaction only.",
     likelyBankStatement ? "For this likely bank statement, return no prose and omit full-page raw text; focus on bankTransactions." : "",
     "For currency, return a 3-letter ISO code such as MYR, USD, SGD, CNY, EUR, GBP, JPY, AUD, THB, or IDR.",
